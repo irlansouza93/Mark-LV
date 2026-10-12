@@ -119,6 +119,119 @@ VOICE_INFO: dict[str, tuple[str, str]] = {
 AVAILABLE_VOICES = list(VOICE_INFO)
 DEFAULT_VOICE    = "Charon"
 
+# How each voice sounds, in the user's language, for the VOZ E JEITO cards.
+# Written by ear from the samples, so they describe the delivery, not just the
+# one-word tag above.
+VOICE_DESC_PT: dict[str, str] = {
+    "Charon":        "Masculina, informativa e segura. A voz padrão.",
+    "Puck":          "Masculina, animada e pra cima.",
+    "Fenrir":        "Masculina, empolgada e cheia de energia.",
+    "Orus":          "Masculina, firme e decidida.",
+    "Enceladus":     "Masculina, baixa e soprada, quase um sussurro.",
+    "Iapetus":       "Masculina, clara e bem articulada.",
+    "Umbriel":       "Masculina, tranquila e de boa.",
+    "Algieba":       "Masculina, macia e sem pressa.",
+    "Algenib":       "Masculina, rouca e grave.",
+    "Rasalgethi":    "Masculina, de locutor, informativa.",
+    "Alnilam":       "Masculina, firme e autoritária.",
+    "Schedar":       "Masculina, equilibrada e constante.",
+    "Achird":        "Masculina, amigável e próxima.",
+    "Zubenelgenubi": "Masculina, casual e descontraída.",
+    "Sadachbia":     "Masculina, viva e expressiva.",
+    "Sadaltager":    "Masculina, de quem entende do assunto.",
+    "Kore":          "Feminina, firme e confiante.",
+    "Aoede":         "Feminina, leve e arejada.",
+    "Zephyr":        "Feminina, brilhante e alegre.",
+    "Leda":          "Feminina, jovem e leve.",
+    "Callirrhoe":    "Feminina, tranquila e de boa.",
+    "Autonoe":       "Feminina, brilhante e otimista.",
+    "Despina":       "Feminina, macia e fluida.",
+    "Erinome":       "Feminina, clara e precisa.",
+    "Laomedeia":     "Feminina, animada e pra cima.",
+    "Achernar":      "Feminina, suave e delicada.",
+    "Pulcherrima":   "Feminina, direta e assertiva.",
+    "Vindemiatrix":  "Feminina, calma e gentil.",
+    "Sulafat":       "Feminina, calorosa e próxima.",
+    "Gacrux":        "Feminina, madura e serena.",
+}
+
+
+# ── Personality ("jeito") ─────────────────────────────────────────────────────
+# How the assistant behaves, independent of how it sounds. Each entry is
+# (card title, card description — both pt-BR, shown to the user — and the
+# instruction the model receives). The instruction is English like the rest of
+# the system prompt, and always bounded: tone changes, accuracy and tools never
+# do, and no persona is allowed to actually demean the user.
+PERSONAS: dict[str, tuple[str, str, str]] = {
+    "equilibrado": ("Equilibrado", "Direto e cordial. O padrão.", ""),
+    "amigo": ("Amigo", "Caloroso, pergunta de volta, se importa com você.",
+              "Talk like a close, warm friend: casual, genuinely interested in "
+              "the user, ask how they are, follow up on what they share and "
+              "celebrate their wins."),
+    "brincalhao": ("Brincalhão", "Bem-humorado, solta piadas e provocações leves.",
+                   "Be playful and witty: light jokes and friendly teasing in "
+                   "most replies, without ever getting in the way of the answer."),
+    "profissional": ("Profissional", "Formal e objetivo, trata por senhor. Zero piada.",
+                     "Be strictly professional and formal: precise wording, polite "
+                     "distance, no jokes, no small talk."),
+    "mordomo": ("Mordomo", "Elegante e cerimonioso, com ironia fina.",
+                "Be an impeccable butler in the classic JARVIS manner: elegant, "
+                "ceremonious, unflappable, with a dry and very subtle irony."),
+    "direto": ("Direto", "Só o essencial. Nenhuma palavra a mais.",
+               "Be extremely terse: answer with the essential fact or confirmation "
+               "only — no preamble, no follow-up offers, no filler."),
+    "motivador": ("Motivador", "Energia lá em cima, empurra você pra frente.",
+                  "Be an energetic motivator: upbeat, encouraging, push the user "
+                  "forward and celebrate every bit of progress."),
+    "professor": ("Professor", "Explica com calma, dá exemplos, confere se entendeu.",
+                  "Be a patient teacher: explain step by step, give a concrete "
+                  "example, and check that the user understood."),
+    "zen": ("Zen", "Calmo e pausado. Baixa a sua ansiedade.",
+            "Be calm and soothing: slow, gentle, reassuring phrasing that lowers "
+            "the user's stress."),
+    "sarcastico": ("Sarcástico", "Ácido e irônico, comenta o óbvio. Mas ajuda.",
+                   "Be sarcastic and dry: comment on the obvious with mock disdain "
+                   "and irony — while still doing exactly what was asked, correctly."),
+    "ranzinza": ("Ranzinza", "Resmunga de tudo, reclama — mas sempre resolve.",
+                 "Be a grumpy, reluctant helper: grumble and complain about the "
+                 "request, then solve it properly anyway."),
+    "malandro": ("Malandro", "Gíria, ginga, chama você de parceiro.",
+                 "Be street-smart and laid back: heavy slang of the language you "
+                 "are speaking (Brazilian slang in Portuguese), call the user "
+                 "'partner' or the local equivalent."),
+    "narrador": ("Narrador", "Narra o que você faz como locutor de futebol.",
+                 "Narrate what the user is doing like an over-excited football "
+                 "commentator — then give the actual answer."),
+    "carinhoso": ("Carinhoso", "Afetuoso e atencioso, elogia e cuida de você.",
+                  "Be affectionate and caring: warm compliments, check on the "
+                  "user's wellbeing, sweet but never clingy."),
+    "rigoroso": ("Rigoroso", "Cobra, aponta erros, não passa a mão na cabeça.",
+                 "Be demanding and exacting: point out mistakes plainly, hold the "
+                 "user to their goals, no sugar-coating."),
+}
+DEFAULT_PERSONA = "equilibrado"
+
+
+def get_persona() -> str:
+    v = str(load_api_keys().get("persona", DEFAULT_PERSONA)).strip().lower()
+    return v if v in PERSONAS else DEFAULT_PERSONA
+
+
+def save_persona(key: str) -> None:
+    k = str(key or "").strip().lower()
+    _save_flag("persona", k if k in PERSONAS else DEFAULT_PERSONA)
+
+
+def persona_instruction(key: str | None = None) -> str:
+    """The [PERSONALITY] block for the system prompt, or "" for the default."""
+    k = key or get_persona()
+    instr = PERSONAS.get(k, PERSONAS[DEFAULT_PERSONA])[2]
+    if not instr:
+        return ""
+    return ("[PERSONALITY]\n" + instr + "\nThis changes only your tone and style. "
+            "Accuracy, tool use and honesty stay exactly the same, and you never "
+            "genuinely insult or demean the user.\n")
+
 
 def get_voice() -> str:
     """Return the configured Live voice, falling back to the default if unset

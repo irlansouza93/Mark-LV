@@ -71,6 +71,7 @@ from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
+    persona_instruction,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core                     import gemini as _gemini
@@ -607,6 +608,8 @@ class JarvisLive:
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_live_vision    = self._on_live_vision_ui   # drawer button
+        self.ui.on_persona_change = self._on_persona_change   # VOZ E JEITO
+        self.ui.on_identity_change = self._on_identity_change # renamed in CUSTOMISE
         self.ui.on_audio_device_change = self._on_audio_device_change
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
@@ -1048,6 +1051,9 @@ class JarvisLive:
         })
 
         parts = [time_ctx, identity_ctx]
+        _persona = persona_instruction()
+        if _persona:
+            parts.append(_persona)
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
@@ -1487,6 +1493,9 @@ class JarvisLive:
             was = self._live_vision
             self._live_vision = False
             self.ui.set_live_vision(False)
+            # Off means the camera is off. This used to only stop sending
+            # frames and leave the webcam running in the HUD.
+            self.ui.stop_camera_stream()
             if was:
                 self.ui.write_log("SYS: Live vision off.")
                 if announce:
@@ -1522,6 +1531,31 @@ class JarvisLive:
         if announce:
             self._tell_model(note)
         return note
+
+    def _on_persona_change(self, key: str) -> None:
+        """New personality from VOZ E JEITO: tell the running conversation now
+        (no reconnect, so nothing said so far is lost); the next connect gets
+        it from the system prompt."""
+        instr = persona_instruction(key).replace("[PERSONALITY]\n", "").strip()
+        self._tell_model(
+            "[PERSONALITY CHANGE] From your next reply on, change your manner: "
+            + (instr or "go back to your default — balanced, direct and cordial.")
+            + " Do not announce or explain the change; just speak that way.")
+
+    def _on_identity_change(self, name: str, user_name: str) -> None:
+        """Renamed in CUSTOMISE. The name is in the system prompt, which is fixed
+        at connect — so without this the assistant kept introducing itself by
+        its old name until the app restarted (and session resumption carried
+        the old name on even then)."""
+        name = (name or "").strip() or "JARVIS"
+        if name == self._asst_name and not user_name:
+            return
+        self._asst_name = name
+        self._tell_model(
+            f"[IDENTITY UPDATE] Your name is now {name}. From now on always refer "
+            f"to yourself as {name} — never by any earlier name, even if one "
+            f"appears earlier in this conversation."
+            + (f" Call the user '{user_name}'." if user_name else ""))
 
     def _on_live_vision_ui(self, on: bool) -> None:
         """Drawer button. Runs the (briefly blocking) switch off the Qt thread."""
@@ -2291,11 +2325,11 @@ class JarvisLive:
                         self._ensure_wake_detector()
                         self._awake = False
                         self.ui.set_state("SLEEPING")
-                        self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
+                        self.ui.write_log(f"SYS: {self._asst_name} online — sleeping. Say 'Hey Jarvis' to wake me.")
                     else:
                         self._awake = True
                         self.ui.set_state("LISTENING")
-                        self.ui.write_log("SYS: JARVIS online.")
+                        self.ui.write_log(f"SYS: {self._asst_name} online.")
 
                     if self._dashboard:
                         await self._dashboard.broadcast({"type": "status", "state": "active"})

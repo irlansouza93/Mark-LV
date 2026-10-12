@@ -1656,13 +1656,12 @@ class HueWheel(QWidget):
 
 
 class CustomizeOverlay(QWidget):
-    """Floating overlay — change assistant name, user name, UI colour, voice and
-    the HUD centrepiece."""
+    """Floating overlay — change assistant name, user name, UI colour and the HUD
+    centrepiece. (Voice and personality live in VoicePersonaOverlay.)"""
 
     saved = pyqtSignal(str, str, str, str)   # assistant_name, user_name, ui_color, voice
     hud_saved = pyqtSignal(str)              # HUD style, on APPLY
-    _preview_sig = pyqtSignal(str)           # voice-sample state, worker → Qt thread
-    _OW, _OH = 420, 700
+    _OW, _OH = 420, 600
 
     def __init__(self, assistant_name="JARVIS", user_name="",
                  ui_color=DEFAULT_UI_COLOR, voice="", parent=None):
@@ -1713,57 +1712,9 @@ class CustomizeOverlay(QWidget):
         self._user_input.setStyleSheet(_fs)
         lay.addWidget(self._user_input)
 
-        # ── Assistant voice — Gemini prebuilt voices ─────────────────────────
-        # All thirty Live voices, in a list rather than a row of pills — thirty
-        # pills do not fit in 420 px. ▶ plays a short sample in that voice (in
-        # the user's language) so a voice can be judged before the session is
-        # rebuilt for it. Applying still rebuilds the Live session.
-        from memory.config_manager import AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_INFO
-        lay.addSpacing(4)
-        lay.addWidget(_lbl("ASSISTANT VOICE  —  ▶ to hear a sample", 8,
-                            color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft))
-        self._sel_voice   = (voice or DEFAULT_VOICE)
-        if self._sel_voice not in AVAILABLE_VOICES:
-            self._sel_voice = DEFAULT_VOICE
-        self.on_preview_audio = None   # callable(bool) — MainWindow closes the mic
-        self._previewing = False
-        _combo_css = (
-            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
-            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
-            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
-            f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
-            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}"
-        )
-        voice_row = QHBoxLayout(); voice_row.setSpacing(6)
-        self._voice_box = QComboBox()
-        self._voice_box.setFont(QFont("Courier New", 9))
-        self._voice_box.setFixedHeight(30)
-        self._voice_box.setStyleSheet(_combo_css)
-        self._voice_box.setMaxVisibleItems(14)
-        for _reg, _sym in (("female", "♀"), ("male", "♂")):
-            for _v in AVAILABLE_VOICES:
-                _char, _r = VOICE_INFO[_v]
-                if _r == _reg:
-                    self._voice_box.addItem(f"{_sym}  {_v:<14} {_char}", _v)
-        self._voice_box.setCurrentIndex(max(0, self._voice_box.findData(self._sel_voice)))
-        self._voice_box.currentIndexChanged.connect(
-            lambda _i: self._on_voice_pick(self._voice_box.currentData()))
-        voice_row.addWidget(self._voice_box, 1)
-        self._play_btn = QPushButton("▶  HEAR")
-        self._play_btn.setFixedSize(84, 30)
-        self._play_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._play_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.PRI};
-                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
-            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
-        """)
-        self._play_btn.clicked.connect(self._toggle_preview)
-        voice_row.addWidget(self._play_btn)
-        lay.addLayout(voice_row)
-        self._voice_note = _lbl("", 7, color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        lay.addWidget(self._voice_note)
-        self._preview_sig.connect(self._on_preview_state)
+        # Voice and personality have their own panel (⚙ SETUP → VOZ E JEITO);
+        # this one passes no voice, which _apply_name_update reads as "unchanged".
+        self._sel_voice = ""
 
         # ── HUD centrepiece ──────────────────────────────────────────────────
         # Previewed live on the HUD behind the overlay, like the colour; CANCEL
@@ -1861,53 +1812,6 @@ class CustomizeOverlay(QWidget):
         btn_row.addWidget(cancel_btn)
         lay.addLayout(btn_row)
 
-    # ── voice selection ──────────────────────────────────────────────────────
-    def _on_voice_pick(self, name: str):
-        if not name:
-            return
-        self._sel_voice = name
-        if self._previewing:
-            self._start_preview()          # already listening — follow the list
-
-    def _toggle_preview(self):
-        if self._previewing:
-            self._stop_preview()
-        else:
-            self._start_preview()
-
-    def _start_preview(self):
-        from core import voice_preview
-        self._previewing = True
-        self._play_btn.setText("■  STOP")
-        if self.on_preview_audio:
-            self.on_preview_audio(True)
-        voice_preview.preview(self._sel_voice, self._preview_sig.emit)
-
-    def _stop_preview(self):
-        from core import voice_preview
-        voice_preview.stop()
-        self._voice_note.setText("")
-        self._preview_done()
-
-    def _preview_done(self):
-        if self._previewing and self.on_preview_audio:
-            self.on_preview_audio(False)
-        self._previewing = False
-        self._play_btn.setText("▶  HEAR")
-
-    def _on_preview_state(self, state: str):
-        if state == "loading":
-            self._voice_note.setText(f"Generating a sample of {self._sel_voice}… "
-                                     "(first time only, ~5 s)")
-        elif state == "playing":
-            self._voice_note.setText(f"Playing {self._sel_voice}.")
-        elif state == "done":
-            self._voice_note.setText("")
-            self._preview_done()
-        elif state.startswith("error:"):
-            self._voice_note.setText("Sample unavailable — " + state[6:][:70])
-            self._preview_done()
-
     # ── HUD style ────────────────────────────────────────────────────────────
     def _on_hud_pick(self, style: str):
         self._sel_hud = style
@@ -1966,8 +1870,6 @@ class CustomizeOverlay(QWidget):
 
     def _cancel(self):
         # If a preview was applied, revert to the colour from launch
-        if self._previewing:
-            self._stop_preview()
         if self.on_preview and self._sel_color != self._initial_color:
             self.on_preview(self._initial_color)
         if self.on_hud_preview and self._sel_hud != self._initial_hud:
@@ -1975,13 +1877,278 @@ class CustomizeOverlay(QWidget):
         self.hide()
 
     def _save(self):
-        if self._previewing:
-            self._stop_preview()
         name = self._name_input.text().strip() or "JARVIS"
         user = self._user_input.text().strip()
         self.hud_saved.emit(self._sel_hud)
         self.saved.emit(name, user, self._sel_color or DEFAULT_UI_COLOR, self._sel_voice)
         self.hide()
+
+
+class _ChoiceCard(QPushButton):
+    """A selectable card: a title over a one-line description."""
+
+    def __init__(self, title: str, desc: str, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(50)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(2)
+        self._t = QLabel(title)
+        self._t.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._d = QLabel(desc)
+        self._d.setFont(QFont("Courier New", 8))
+        for w in (self._t, self._d):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            lay.addWidget(w)
+        self.toggled.connect(self._restyle)
+        self._restyle(False)
+
+    def set_title(self, text: str) -> None:
+        self._t.setText(text)
+
+    def _restyle(self, on: bool) -> None:
+        self.setStyleSheet(f"""
+            _ChoiceCard {{ background: {C.PRI_GHO if on else "transparent"};
+                border: 1px solid {C.PRI if on else C.BORDER}; border-radius: 4px; }}
+            _ChoiceCard:hover {{ border: 1px solid {C.PRI if on else C.BORDER_B}; }}
+        """)
+        self._t.setStyleSheet(f"color: {C.PRI if on else C.TEXT}; background: transparent;")
+        self._d.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+
+
+class VoicePersonaOverlay(QWidget):
+    """VOZ E JEITO — how the assistant sounds and how it behaves, side by side.
+
+    Voice: clicking a card plays a short sample in that voice straight away.
+    The voice itself is fixed when the Live session connects, so it is applied
+    once, when the panel closes, instead of rebuilding the session on every
+    audition. Personality: applied the moment it is clicked — it is a note to
+    the running conversation, no reconnect needed.
+    """
+
+    closed = pyqtSignal(str)                # chosen voice (applied by MainWindow)
+    persona_picked = pyqtSignal(str)
+    _preview_sig = pyqtSignal(str)          # sample state, worker → Qt thread
+    _OW, _OH = 760, 760
+
+    def __init__(self, assistant_name: str, voice: str, persona: str, parent=None):
+        super().__init__(parent)
+        from memory.config_manager import (AVAILABLE_VOICES, DEFAULT_VOICE,
+                                           PERSONAS, VOICE_DESC_PT, VOICE_INFO)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            VoicePersonaOverlay {{ background: rgba(0, 6, 10, 248);
+                border: 1px solid {C.BORDER_B}; border-radius: 6px; }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: transparent; width: 6px; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 3px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        """)
+        self.on_preview_audio = None        # callable(bool) — closes the mic while a sample plays
+        self._voice = voice if voice in AVAILABLE_VOICES else DEFAULT_VOICE
+        self._initial_voice = self._voice
+        self._persona = persona if persona in PERSONAS else "equilibrado"
+        self._playing = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 14)
+        root.setSpacing(8)
+
+        top = QHBoxLayout()
+        ttl = QLabel("🎙  VOZ E JEITO")
+        ttl.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        ttl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        top.addWidget(ttl)
+        top.addStretch()
+        x = QPushButton("✕  FECHAR")
+        x.setFixedHeight(28)
+        x.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        x.setCursor(Qt.CursorShape.PointingHandCursor)
+        x.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; padding: 0 10px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        x.clicked.connect(self.close_panel)
+        top.addWidget(x)
+        root.addLayout(top)
+
+        sub_lbl = QLabel(f"Escolha como {assistant_name} fala e como se comporta. "
+                         "Clique numa voz para ouvir; o jeito muda na hora.")
+        sub_lbl.setWordWrap(True)
+        sub_lbl.setFont(QFont("Courier New", 8))
+        sub_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        root.addWidget(sub_lbl)
+
+        cols = QHBoxLayout()
+        cols.setSpacing(14)
+
+        def _column(head: str, sub: str):
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            h = QLabel(f"<b>{head}</b>  ·  {sub}")
+            h.setFont(QFont("Courier New", 8))
+            h.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+            col.addWidget(h)
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            inner = QWidget()
+            inner.setStyleSheet("background: transparent;")
+            box = QVBoxLayout(inner)
+            box.setContentsMargins(0, 0, 6, 0)
+            box.setSpacing(6)
+            area.setWidget(inner)
+            col.addWidget(area, 1)
+            cols.addLayout(col, 1)
+            return box
+
+        vbox = _column("VOZ", "como soa")
+        self._voice_cards: dict[str, _ChoiceCard] = {}
+        # Female voices first, then male — the same order as the samples were
+        # described in, so similar voices sit next to each other.
+        order = ([v for v in AVAILABLE_VOICES if VOICE_INFO[v][1] == "female"]
+                 + [v for v in AVAILABLE_VOICES if VOICE_INFO[v][1] == "male"])
+        for v in order:
+            c = _ChoiceCard(v, VOICE_DESC_PT.get(v, VOICE_INFO[v][0]))
+            c.clicked.connect(lambda _=False, name=v: self._pick_voice(name))
+            self._voice_cards[v] = c
+            vbox.addWidget(c)
+        vbox.addStretch()
+
+        pbox = _column("JEITO", "como age")
+        self._persona_cards: dict[str, _ChoiceCard] = {}
+        for k, (title, desc, _instr) in PERSONAS.items():
+            c = _ChoiceCard(title, desc)
+            c.clicked.connect(lambda _=False, key=k: self._pick_persona(key))
+            self._persona_cards[k] = c
+            pbox.addWidget(c)
+        pbox.addStretch()
+        root.addLayout(cols, 1)
+
+        self._note = QLabel("")
+        self._note.setFont(QFont("Courier New", 8))
+        self._note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        root.addWidget(self._note)
+
+        self._preview_sig.connect(self._on_preview_state)
+        self._refresh()
+
+    # ── selection ───────────────────────────────────────────────────────────
+    def _refresh(self) -> None:
+        for k, c in self._voice_cards.items():
+            c.setChecked(k == self._voice)
+            c.set_title(f"▶  {k}" if (self._playing and k == self._voice) else k)
+        for k, c in self._persona_cards.items():
+            c.setChecked(k == self._persona)
+
+    def _pick_voice(self, name: str) -> None:
+        from core import voice_preview
+        self._voice = name
+        self._playing = True
+        if self.on_preview_audio:
+            self.on_preview_audio(True)
+        voice_preview.preview(name, self._preview_sig.emit)
+        self._refresh()
+
+    def _pick_persona(self, key: str) -> None:
+        self._persona = key
+        self._refresh()
+        self.persona_picked.emit(key)
+
+    def _on_preview_state(self, state: str) -> None:
+        if state == "loading":
+            self._note.setText(f"Gerando uma amostra de {self._voice}… (só na primeira vez)")
+        elif state == "playing":
+            self._note.setText(f"Tocando {self._voice}. A voz escolhida entra quando "
+                               "você fechar o painel.")
+        elif state in ("done",) or state.startswith("error:"):
+            if state.startswith("error:"):
+                self._note.setText("Amostra indisponível — " + state[6:][:80])
+            self._sample_over()
+
+    def _sample_over(self) -> None:
+        if self._playing and self.on_preview_audio:
+            self.on_preview_audio(False)
+        self._playing = False
+        self._refresh()
+
+    def close_panel(self) -> None:
+        from core import voice_preview
+        voice_preview.stop()
+        self._sample_over()
+        self.hide()
+        self.closed.emit(self._voice)
+
+
+class _CameraPip(QWidget):
+    """The live camera as a small floating window over the HUD.
+
+    The hologram keeps the centre of the screen: what the assistant sees is
+    shown here, small, with a STOP that cannot be missed. ⤢ moves the feed into
+    the HUD for a closer look, and the HUD page's ⤡ brings it back here.
+    """
+
+    _W = 300
+    stop_clicked = pyqtSignal()
+    expand_clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            _CameraPip {{ background: rgba(0, 6, 10, 240);
+                border: 1px solid {C.PRI}; border-radius: 6px; }}
+        """)
+        self.setFixedWidth(self._W)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 5, 6, 6)
+        lay.setSpacing(4)
+        hdr = QHBoxLayout()
+        self._title = QLabel("◉  CAMERA")
+        self._title.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.addWidget(self._title)
+        hdr.addStretch()
+
+        def _btn(text: str, danger: bool = False) -> QPushButton:
+            b = QPushButton(text)
+            b.setFixedHeight(20)
+            b.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            col = C.RED if danger else C.PRI
+            b.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {col};
+                    border: 1px solid {col}; border-radius: 3px; padding: 0 6px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; }}
+            """)
+            return b
+
+        exp = _btn("⤢")
+        exp.setToolTip("Show the camera in the HUD")
+        exp.clicked.connect(self.expand_clicked.emit)
+        hdr.addWidget(exp)
+        stop = _btn("✕  STOP", danger=True)
+        stop.clicked.connect(self.stop_clicked.emit)
+        hdr.addWidget(stop)
+        lay.addLayout(hdr)
+        self._img = QLabel()
+        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img.setStyleSheet("background: #000308; border-radius: 3px;")
+        self._img.setFixedSize(self._W - 12, int((self._W - 12) * 9 / 16))
+        lay.addWidget(self._img)
+        self.adjustSize()
+        self.hide()
+
+    def set_live(self, live: bool) -> None:
+        self._title.setText("◉  LIVE VISION — WATCHING" if live else "◉  CAMERA")
+
+    def set_frame(self, px: QPixmap) -> None:
+        self._img.setPixmap(px.scaled(
+            self._img.width(), self._img.height(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
 
 
 class PluginManagerOverlay(QWidget):
@@ -3190,18 +3357,22 @@ class MainWindow(QMainWindow):
         _cam_title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         _cam_hdr.addWidget(_cam_title)
         _cam_hdr.addStretch()
-        _cam_x = QPushButton("✕  CLOSE")
-        _cam_x.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        _cam_x.setCursor(Qt.CursorShape.PointingHandCursor)
-        _cam_x.setStyleSheet(f"""
-            QPushButton {{
-                color: {C.TEXT_DIM}; background: transparent;
-                border: none; padding: 2px 6px;
-            }}
-            QPushButton:hover {{ color: {C.PRI}; }}
-        """)
-        _cam_x.clicked.connect(self.stop_camera_stream)
-        _cam_hdr.addWidget(_cam_x)
+        # These used to be one borderless dim "✕ CLOSE" that was easy to miss —
+        # and with it missed there was no way out of the camera at all.
+        _cam_min = QPushButton("⤡  MINIMISE")
+        _cam_x = QPushButton("✕  STOP CAMERA")
+        for _b, _col in ((_cam_min, C.PRI), (_cam_x, C.RED)):
+            _b.setFixedHeight(26)
+            _b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ color: {_col}; background: transparent;
+                    border: 1px solid {_col}; border-radius: 3px; padding: 0 10px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; }}
+            """)
+            _cam_hdr.addWidget(_b)
+        _cam_min.clicked.connect(lambda: self._set_cam_mode("pip"))
+        _cam_x.clicked.connect(self._stop_camera_clicked)
         _cam_v.addLayout(_cam_hdr)
         self._cam_live_lbl = QLabel()
         self._cam_live_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3400,6 +3571,11 @@ class MainWindow(QMainWindow):
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
         self._cam_preview = _CameraPreview(self.centralWidget())
+        # Live camera as a floating window; the HUD keeps the hologram.
+        self._cam_mode = "pip"
+        self._cam_pip = _CameraPip(self.centralWidget())
+        self._cam_pip.stop_clicked.connect(self._stop_camera_clicked)
+        self._cam_pip.expand_clicked.connect(lambda: self._set_cam_mode("hud"))
 
         # Clipboard panel (child of central widget, bottom-center)
         self._clipboard_panel = ClipboardPanel(self.centralWidget())
@@ -3432,15 +3608,57 @@ class MainWindow(QMainWindow):
 
     # --- Live camera stream in HUD area ------------------------------------
     def _on_cam_stream(self, start: bool) -> None:
+        self._cam_running = bool(start)
         if start:
+            self._set_cam_mode(self._cam_mode)
+        else:
+            self._cam_pip.hide()
+            if self._hud_cam_stack.currentIndex() == 1:
+                self._hud_cam_stack.setCurrentIndex(0)
+            self._cam_live_lbl.clear()
+
+    def _set_cam_mode(self, mode: str) -> None:
+        """'pip' — small window, hologram stays; 'hud' — the feed fills the HUD."""
+        self._cam_mode = mode
+        if not getattr(self, "_cam_running", False):
+            return
+        if mode == "hud":
+            self._cam_pip.hide()
             self._hud_cam_stack.setCurrentIndex(1)
         else:
-            self._hud_cam_stack.setCurrentIndex(0)
-            self._cam_live_lbl.clear()
+            if self._hud_cam_stack.currentIndex() == 1:
+                self._hud_cam_stack.setCurrentIndex(0)
+            self._cam_pip.set_live(getattr(self, "_vision_on", False))
+            self._position_cam_pip()
+            self._cam_pip.show()
+            self._cam_pip.raise_()
+
+    def _position_cam_pip(self) -> None:
+        try:
+            cw = self.centralWidget()
+            top_left = self._hud_cam_stack.mapTo(cw, QPoint(0, 0))
+            x = top_left.x() + self._hud_cam_stack.width() - self._cam_pip.width() - 12
+            self._cam_pip.move(max(0, x), top_left.y() + 12)
+        except Exception:
+            pass
+
+    def _stop_camera_clicked(self) -> None:
+        """STOP from either camera view. With live vision on, stopping it is
+        the assistant's business too (it must stop sending frames and know it
+        can no longer see) — so it goes through the same switch as the drawer
+        button, which also closes the camera."""
+        if getattr(self, "_vision_on", False) and getattr(self, "on_live_vision", None):
+            self.on_live_vision(False)
+        self.stop_camera_stream()
 
     def _on_cam_frame(self, data: bytes) -> None:
         px = QPixmap()
         px.loadFromData(data)
+        if px.isNull():
+            return
+        if self._cam_mode == "pip":
+            self._cam_pip.set_frame(px)
+            return
         if not px.isNull():
             w, h = self._cam_live_lbl.width(), self._cam_live_lbl.height()
             if w > 1 and h > 1:
@@ -3450,11 +3668,12 @@ class MainWindow(QMainWindow):
                               Qt.TransformationMode.SmoothTransformation)
                 )
 
-    def start_camera_stream(self) -> None:
-        """Open the webcam into the HUD. Idempotent: a stream that is already
-        running is kept rather than joined by a second one — two captures on
-        one device fail on Windows, and the loser's cleanup used to hide the
-        winner's feed."""
+    def start_camera_stream(self, mode: str = "pip") -> None:
+        """Open the webcam — in the floating window by default, so the hologram
+        stays on screen. Idempotent: a stream that is already running is kept
+        rather than joined by a second one — two captures on one device fail
+        on Windows, and the loser's cleanup used to hide the winner's feed."""
+        self._cam_mode = mode if mode in ("pip", "hud") else "pip"
         self._cam_stop.clear()
         th = getattr(self, "_cam_thread", None)
         if th is not None and th.is_alive():
@@ -4058,6 +4277,8 @@ class MainWindow(QMainWindow):
             cw.height() - ph - 28,
             pw, ph,
         )
+        if hasattr(self, "_cam_pip") and self._cam_pip.isVisible():
+            self._position_cam_pip()
         # Clipboard panel — bottom-center
         if hasattr(self, '_clipboard_panel') and self._clipboard_panel.isVisible():
             self._position_clipboard_panel()
@@ -4410,6 +4631,14 @@ class MainWindow(QMainWindow):
         self._autostart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._autostart_btn.clicked.connect(self._toggle_autostart)
         lay.addWidget(self._autostart_btn)
+
+        vp_btn = QPushButton("🎙  VOZ E JEITO")
+        vp_btn.setFixedHeight(26)
+        vp_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        vp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        vp_btn.setStyleSheet(_BTN_STYLE_PRI)
+        vp_btn.clicked.connect(self._open_voice_persona)
+        lay.addWidget(vp_btn)
 
         cust_btn = QPushButton("⚙  CUSTOMISE ASSISTANT")
         cust_btn.setFixedHeight(26)
@@ -5287,7 +5516,19 @@ class MainWindow(QMainWindow):
                 border: 1px solid {C.BORDER}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}"""
+        if getattr(self, "_wake_installing", False):
+            # An install is running. Repainting it back to "DOWNLOAD" and
+            # re-enabling the button — what this did whenever the drawer
+            # reopened — is how one click turned into a loop of installs.
+            self._wake_btn.setText("⬇  INSTALLING WAKE WORD… (see log)")
+            self._wake_btn.setEnabled(False)
+            self._wake_sleep_btn.hide()
+            return
         self._wake_btn.setEnabled(True)
+        self._wake_btn.setToolTip(
+            "Local wake word: JARVIS sleeps (mic closed to the cloud) until it "
+            "hears 'Hey Jarvis'. The phrase is fixed — a custom name needs a "
+            "trained model.")
         if not st["ready"]:
             self._wake_btn.setText("⬇  WAKE WORD: DOWNLOAD")
             self._wake_btn.setStyleSheet(_off)
@@ -5365,6 +5606,8 @@ class MainWindow(QMainWindow):
         """Paint the live-vision button. Called by the assistant as well, since
         it can be switched on and off by voice."""
         self._vision_on = bool(on)
+        if hasattr(self, "_cam_pip"):
+            self._cam_pip.set_live(self._vision_on)
         btn = getattr(self, "_vision_btn", None)
         if btn is None:
             return
@@ -5462,9 +5705,12 @@ class MainWindow(QMainWindow):
 
     def _toggle_wake_word(self):
         st = self._wake_state()
+        if getattr(self, "_wake_installing", False):
+            return
         if not st["ready"]:
             # First time: download openwakeword + model in a worker thread.
-            self._wake_btn.setText("⬇  DOWNLOADING… (one-time)")
+            self._wake_installing = True
+            self._wake_btn.setText("⬇  INSTALLING WAKE WORD… (see log)")
             self._wake_btn.setEnabled(False)
             def _work():
                 try:
@@ -5490,6 +5736,7 @@ class MainWindow(QMainWindow):
         self._refresh_wake_btns()
 
     def _on_wake_install_done(self, ok: bool, msg: str):
+        self._wake_installing = False
         self._log_sig.emit(f"SYS: {'Wake word ready.' if ok else 'Wake word setup failed: ' + msg}")
         self._refresh_wake_btns()
 
@@ -5548,11 +5795,53 @@ class MainWindow(QMainWindow):
         )
         ov.on_preview = self._preview_ui_color
         ov.on_hud_preview = self._preview_hud_style
-        ov.on_preview_audio = self._voice_sample_playing
         ov.hud_saved.connect(self._set_hud_style)
         ov.saved.connect(self._apply_name_update)
         ov.show()
         self._customize_overlay = ov
+
+    def _open_voice_persona(self) -> None:
+        from memory.config_manager import get_persona, get_voice
+        self._close_setup()
+        old = getattr(self, "_vp_overlay", None)
+        if old is not None:
+            old.hide()
+            old.deleteLater()
+        cw = self.centralWidget()
+        ov = VoicePersonaOverlay(self._assistant_name, get_voice(), get_persona(),
+                                 parent=cw)
+        ow = min(VoicePersonaOverlay._OW, cw.width() - 16)
+        oh = min(VoicePersonaOverlay._OH, cw.height() - 16)
+        ov.setGeometry((cw.width() - ow) // 2, (cw.height() - oh) // 2, ow, oh)
+        ov.on_preview_audio = self._voice_sample_playing
+        ov.persona_picked.connect(self._apply_persona)
+        ov.closed.connect(self._apply_voice_choice)
+        ov.show()
+        ov.raise_()
+        self._vp_overlay = ov
+
+    def _apply_persona(self, key: str) -> None:
+        from memory.config_manager import PERSONAS, get_persona, save_persona
+        if key == get_persona():
+            return
+        save_persona(key)
+        self._log.append_log(f"SYS: Jeito — {PERSONAS[key][0]}.")
+        cb = getattr(self, "on_persona_change", None)
+        if cb:
+            try:
+                cb(key)
+            except Exception:
+                pass
+
+    def _apply_voice_choice(self, voice: str) -> None:
+        """The panel closed: switch voice now if it changed (one reconnect)."""
+        from memory.config_manager import get_voice, save_voice
+        if not voice or voice == get_voice():
+            return
+        save_voice(voice)
+        self._log.append_log(f"SYS: Voice set — {voice}")
+        if self.on_voice_change:
+            self.on_voice_change()
 
     def _voice_sample_playing(self, playing: bool) -> None:
         """Close the mic while a voice sample plays, so JARVIS does not answer
@@ -5623,6 +5912,13 @@ class MainWindow(QMainWindow):
                 self._log.append_log(f"SYS: Voice set — {voice}")
         except Exception as e:
             self._log.append_log(f"ERR: Config save failed — {e}")
+
+        cb = getattr(self, "on_identity_change", None)
+        if cb:
+            try:
+                cb(self._assistant_name, user_name.strip())
+            except Exception:
+                pass
 
         if voice_changed and self.on_voice_change:
             self.on_voice_change()
@@ -6081,9 +6377,9 @@ class JarvisUI:
     def video_is_playing(self) -> bool:
         return bool(self._win.video_is_playing())
 
-    def start_camera_stream(self) -> None:
-        """Thread-safe: start live camera feed in the full HUD area."""
-        self._win.start_camera_stream()
+    def start_camera_stream(self, mode: str = "pip") -> None:
+        """Thread-safe: start the live camera feed (floating window by default)."""
+        self._win.start_camera_stream(mode)
 
     def camera_streaming(self) -> bool:
         """Thread-safe: True while the webcam stream is running."""
@@ -6096,6 +6392,22 @@ class JarvisUI:
     def set_live_vision(self, on: bool) -> None:
         """Thread-safe: reflect the live-vision state on the drawer button."""
         self._win._vision_state_sig.emit(bool(on))
+
+    @property
+    def on_persona_change(self):
+        return getattr(self._win, "on_persona_change", None)
+
+    @on_persona_change.setter
+    def on_persona_change(self, cb):
+        self._win.on_persona_change = cb
+
+    @property
+    def on_identity_change(self):
+        return getattr(self._win, "on_identity_change", None)
+
+    @on_identity_change.setter
+    def on_identity_change(self, cb):
+        self._win.on_identity_change = cb
 
     @property
     def on_live_vision(self):

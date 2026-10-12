@@ -86,6 +86,12 @@ def install_and_download(logger: Callable[[str], None] = print,
             if r.returncode != 0:
                 tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
                 return False, f"pip install failed: {tail[0][:160]}"
+            # The import system caches directory listings: a package pip has
+            # just put into site-packages stays invisible to this process until
+            # the caches are dropped, so the model download below failed with
+            # "No module named openwakeword" and left the models folder empty.
+            import importlib
+            importlib.invalidate_caches()
         # Download the pretrained melspectrogram/embedding + wake models.
         logger("Wake word: downloading models…")
         _tell("Wake word: downloading models…")
