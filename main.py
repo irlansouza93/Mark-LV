@@ -369,11 +369,33 @@ TOOL_DECLARATIONS = [
     {
         "name": "close_camera",
         "description": (
-            "Closes the live camera view shown on screen. "
+            "Closes the live camera view shown on screen, and stops live vision "
+            "if it is on. "
             "Call when the user says (in ANY language): close camera, stop camera, "
             "turn off camera, that's creepy, etc."
         ),
         "parameters": {"type": "OBJECT", "properties": {}, "required": []}
+    },
+    {
+        "name": "live_camera",
+        "description": (
+            "Turns LIVE VISION on or off: a continuous webcam feed (about one "
+            "frame a second) that lets you see the user in real time, like a "
+            "video call, until it is switched off. "
+            "Use 'start' when the user wants you to keep watching, see them, "
+            "look at them while you talk, keep an eye on them, have a video "
+            "call, etc. (in ANY language). Use 'stop' for stop watching / stop "
+            "looking / turn off live vision. For a single look at one moment, "
+            "use screen_process with angle 'camera' instead."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING",
+                           "description": "'start' or 'stop'"},
+            },
+            "required": ["action"],
+        }
     },
     {
         "name": "manage_monitor",
@@ -551,6 +573,10 @@ class JarvisLive:
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
+        # Live vision: the webcam stream's frames are sent to the session about
+        # once a second while this is on. Kept across reconnects — the stream
+        # itself lives in the UI and survives them.
+        self._live_vision          = False
         self._interrupted          = False   # True while draining audio after user interrupt
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
@@ -580,6 +606,7 @@ class JarvisLive:
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
+        self.ui.on_live_vision    = self._on_live_vision_ui   # drawer button
         self.ui.on_audio_device_change = self._on_audio_device_change
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
@@ -1178,10 +1205,22 @@ class JarvisLive:
                     self._vision_last_time = _now
                     angle     = args.get("angle", "screen").lower()
                     user_text = args.get("text", "What do you see?")
-                    if angle == "camera":
-                        img_b, mime_t = await loop.run_in_executor(None, _capture_camera)
+                    live_frame = (self.ui.camera_frame(max_age=1.5)
+                                  if angle == "camera" else None)
+                    if live_frame:
+                        # The stream already owns the camera — opening it a
+                        # second time fails on Windows. Use its newest frame.
+                        img_b, mime_t = live_frame, "image/jpeg"
+                        print(f"[Vision] 📷 Camera (live stream): {len(img_b):,} bytes")
+                        _stall = "camera"
+                    elif angle == "camera":
+                        try:
+                            img_b, mime_t = await loop.run_in_executor(None, _capture_camera)
+                        except Exception as cam_err:
+                            self._vision_busy = False
+                            raise RuntimeError(f"Camera unavailable: {cam_err}")
                         self.ui.start_camera_stream()
-                        self._vision_cam_active = True
+                        self._vision_cam_active = not self._live_vision
                         print(f"[Vision] 📷 Camera: {len(img_b):,} bytes")
                         _stall = "camera"
                     else:
@@ -1202,8 +1241,14 @@ class JarvisLive:
                     )
 
             elif name == "close_camera":
+                self._set_live_vision(False, announce=False)
                 self.ui.stop_camera_stream()
                 result = "Camera closed."
+
+            elif name == "live_camera":
+                on = str(args.get("action", "start")).lower().strip() != "stop"
+                result = await loop.run_in_executor(
+                    None, lambda: self._set_live_vision(on, announce=False))
 
             elif name == "system_status":
                 r = await loop.run_in_executor(None, get_system_status)
@@ -1426,6 +1471,107 @@ class JarvisLive:
             print(f"[JARVIS] ❌ Mic: {e}")
             raise
 
+    # ── live vision ──────────────────────────────────────────────────────────
+    LIVE_VISION_INTERVAL = 1.0      # seconds between frames — the Live API's own rate
+
+    def _set_live_vision(self, on: bool, announce: bool = True) -> str:
+        """Switch live vision on or off. Callable from any thread.
+
+        Starting it opens the webcam stream (which the UI owns) and waits up to
+        a few seconds for its first frame, so a camera Windows has blocked is
+        reported as such instead of silently sending nothing. `announce` tells
+        the model in-band — used when the user flips it from the UI, since a
+        voice request already gets the answer as the tool result.
+        """
+        if not on:
+            was = self._live_vision
+            self._live_vision = False
+            self.ui.set_live_vision(False)
+            if was:
+                self.ui.write_log("SYS: Live vision off.")
+                if announce:
+                    self._tell_model("[LIVE VISION OFF] The webcam feed has stopped; "
+                                     "you can no longer see the user.")
+            return "Live vision is off. You can no longer see the user."
+
+        self.ui.start_camera_stream()
+        deadline = time.time() + 8.0
+        while time.time() < deadline and not self.ui.camera_frame():
+            if not self.ui.camera_streaming() and time.time() > deadline - 7.0:
+                break                       # the stream gave up — it logged why
+            time.sleep(0.1)
+        if not self.ui.camera_frame():
+            self.ui.set_live_vision(False)
+            try:
+                from actions.screen_processor import camera_problem
+                why = camera_problem()
+            except Exception:
+                why = ""
+            return ("Live vision could not start: the webcam did not deliver a "
+                    "picture. " + (why or "Check that a camera is connected and "
+                                          "not in use by another app."))
+        self._live_vision = True
+        self.ui.set_live_vision(True)
+        self.ui.write_log("SYS: Live vision on — I can see you through the webcam.")
+        note = ("[LIVE VISION ON] You now receive the user's webcam continuously, "
+                "about one frame a second, as [IMAGE SOURCE: WEBCAM]. You can see "
+                "them in real time, like a friend on a video call: notice their "
+                "expression, gestures and what they show you, and bring it up when "
+                "it is natural — do not narrate every frame or comment unprompted "
+                "on every change.")
+        if announce:
+            self._tell_model(note)
+        return note
+
+    def _on_live_vision_ui(self, on: bool) -> None:
+        """Drawer button. Runs the (briefly blocking) switch off the Qt thread."""
+        threading.Thread(target=self._set_live_vision, args=(bool(on), True),
+                         daemon=True, name="live-vision").start()
+
+    def _tell_model(self, text: str) -> None:
+        """Put a note into the conversation without asking for a reply."""
+        if not (self._loop and self.session):
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.session.send_client_content(
+                    turns={"role": "user", "parts": [{"text": text}]},
+                    turn_complete=False),
+                self._loop)
+        except Exception:
+            pass
+
+    async def _run_live_vision(self) -> None:
+        """Send the webcam to the session while live vision is on.
+
+        Frames go through `realtime_input.video`, the Live API's own channel
+        for a camera: they become part of what the model is looking at without
+        ending a turn or asking for an answer, so it sees continuously and
+        speaks only when there is something to say. Nothing is sent while the
+        assistant is asleep — the wake word's promise covers the camera too.
+        """
+        last_sent = None
+        while True:
+            await asyncio.sleep(self.LIVE_VISION_INTERVAL)
+            if not self._live_vision or not self.session:
+                continue
+            if not self.ui.camera_streaming():
+                # A video took the centre of the HUD, the user closed the feed,
+                # or the camera went away. Live vision cannot outlive its stream.
+                self._set_live_vision(False, announce=True)
+                continue
+            if self._wake_enabled and not self._awake:
+                continue
+            frame = self.ui.camera_frame()
+            if not frame or frame is last_sent:
+                continue
+            last_sent = frame
+            try:
+                await self.session.send_realtime_input(
+                    video=types.Blob(data=frame, mime_type="image/jpeg"))
+            except Exception as e:
+                print(f"[Vision] live frame failed: {e}")
+
     async def _flush_pending_vision(self) -> bool:
         """Send a captured frame immediately after its tool response.
 
@@ -1580,7 +1726,8 @@ class JarvisLive:
                                 self._vision_busy = False
                                 async def _cam_close():
                                     await asyncio.sleep(2.0)
-                                    self.ui.stop_camera_stream()
+                                    if not self._live_vision:
+                                        self.ui.stop_camera_stream()
                                 asyncio.create_task(_cam_close())
 
                     if response.tool_call:
@@ -2163,6 +2310,7 @@ class JarvisLive:
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
+                    tg.create_task(self._run_live_vision())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 

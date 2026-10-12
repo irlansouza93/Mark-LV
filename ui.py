@@ -53,8 +53,14 @@ from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QGridLayout,
 )
+
+try:
+    from core.holo_viz import HoloOrb, HoloProjector
+except Exception as _e:            # noqa: BLE001 - one style lost, never fatal
+    HoloOrb = HoloProjector = None
+    print(f"[HUD] holographic visualisers unavailable ({_e}).")
 
 try:
     from core.avatar import HoloAvatar
@@ -424,8 +430,10 @@ class HudCanvas(QWidget):
                 self._avatar = None
 
         # Which centrepiece to draw. Read once here and changed live by the
-        # settings toggle; the avatar object is kept either way so switching
-        # back is instant and costs no reload.
+        # settings (set_style). Every renderer is built the first time it is
+        # shown and then kept, so switching back is instant and costs no reload.
+        # "core" has no object: it is _paint_core below.
+        self._renderers: dict = {"face": self._avatar}
         try:
             from memory.config_manager import get_hud_style
             self.hud_style = get_hud_style()
@@ -468,11 +476,37 @@ class HudCanvas(QWidget):
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
 
+    def _renderer(self, style: str):
+        """The object that draws `style`, built on first use; None means the
+        reactor core (or a style whose renderer could not be built)."""
+        if style in self._renderers:
+            return self._renderers[style]
+        r = None
+        try:
+            if style in ("female", "wakanda") and HoloAvatar is not None:
+                r = HoloAvatar(style)
+            elif style == "orb" and HoloOrb is not None:
+                r = HoloOrb()
+            elif style == "holo" and HoloProjector is not None:
+                r = HoloProjector()
+        except Exception as e:
+            print(f"[HUD] style '{style}' unavailable: {e}")
+            r = None
+        self._renderers[style] = r
+        return r
+
+    def set_style(self, style: str) -> None:
+        """Switch the centrepiece now (persisting is the caller's business)."""
+        self.hud_style = style
+        self._renderer(style)
+        self.update()
+
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
         try:
-            if self._avatar is not None:
-                self._avatar.glance(dx, dy, hold)
+            rend = self._renderer(self.hud_style)
+            if rend is not None:
+                rend.glance(dx, dy, hold)
         except Exception:
             pass
 
@@ -606,8 +640,9 @@ class HudCanvas(QWidget):
         # starts talking. Same lesson the head's sway taught.
         self._core_phase += min(0.10, max(0.0, dt))
 
-        if self._avatar is not None and self.hud_style == "face":
-            self._avatar.step(dt, amp, speaking=self.speaking,
+        rend = self._renderer(self.hud_style)
+        if rend is not None:
+            rend.step(dt, amp, speaking=self.speaking,
                               muted=self.muted, state=self.state,
                               v_open=v_open, v_wide=v_wide or 0.0,
                               v_level=v_level, v_seq=v_seq,
@@ -863,11 +898,10 @@ class HudCanvas(QWidget):
         # capped by width, so it fills the HUD at any window size — including
         # fullscreen — without ever colliding with the status text below.
         _sy_status = cy + fw * 0.40
-        if self._avatar is not None and self.hud_style == "face":
+        rend = self._renderer(self.hud_style)
+        if rend is not None:
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
-            _r_head = min(fw * 0.355, _band_h / (self._avatar.SPAN + 0.08))
-            _head_cy = _band_t + (_band_h - self._avatar.SPAN * _r_head) / 2.0 + _r_head
 
             if self.muted:
                 _main = _acc = qcol(C.MUTED_C)
@@ -881,7 +915,15 @@ class HudCanvas(QWidget):
                     _acc = qcol(C.GREEN)
                 else:
                     _acc = qcol(C.PRI)
-            self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
+            if HoloAvatar is not None and isinstance(rend, HoloAvatar):
+                _r_head = min(fw * 0.355, _band_h / (rend.SPAN + 0.08))
+                _head_cy = (_band_t + (_band_h - rend.SPAN * _r_head) / 2.0
+                            + rend.TOP * _r_head)
+                rend.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
+            else:
+                _r = min(W * 0.40, _band_h / 2.0)
+                rend.paint(p, cx, _band_t + _band_h / 2.0, _r, _main, _acc,
+                           qcol(C.BG), W, _band_h)
 
         # reactor core — the other centrepiece, and the fallback if the head
         # could not be built. There is no third path: the old face.png branch
@@ -1614,10 +1656,13 @@ class HueWheel(QWidget):
 
 
 class CustomizeOverlay(QWidget):
-    """Floating overlay — change assistant name, user name, UI colour and voice."""
+    """Floating overlay — change assistant name, user name, UI colour, voice and
+    the HUD centrepiece."""
 
     saved = pyqtSignal(str, str, str, str)   # assistant_name, user_name, ui_color, voice
-    _OW, _OH = 400, 588
+    hud_saved = pyqtSignal(str)              # HUD style, on APPLY
+    _preview_sig = pyqtSignal(str)           # voice-sample state, worker → Qt thread
+    _OW, _OH = 420, 700
 
     def __init__(self, assistant_name="JARVIS", user_name="",
                  ui_color=DEFAULT_UI_COLOR, voice="", parent=None):
@@ -1669,28 +1714,80 @@ class CustomizeOverlay(QWidget):
         lay.addWidget(self._user_input)
 
         # ── Assistant voice — Gemini prebuilt voices ─────────────────────────
-        # Names are language-neutral proper nouns, so the row reads the same in
-        # every locale. Selecting one and applying rebuilds the Live session.
-        from memory.config_manager import AVAILABLE_VOICES, DEFAULT_VOICE
+        # All thirty Live voices, in a list rather than a row of pills — thirty
+        # pills do not fit in 420 px. ▶ plays a short sample in that voice (in
+        # the user's language) so a voice can be judged before the session is
+        # rebuilt for it. Applying still rebuilds the Live session.
+        from memory.config_manager import AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_INFO
         lay.addSpacing(4)
-        lay.addWidget(_lbl("ASSISTANT VOICE", 8, color=C.TEXT_DIM,
-                            align=Qt.AlignmentFlag.AlignLeft))
+        lay.addWidget(_lbl("ASSISTANT VOICE  —  ▶ to hear a sample", 8,
+                            color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft))
         self._sel_voice   = (voice or DEFAULT_VOICE)
         if self._sel_voice not in AVAILABLE_VOICES:
             self._sel_voice = DEFAULT_VOICE
-        self._voice_btns: dict[str, QPushButton] = {}
-        voice_row = QHBoxLayout(); voice_row.setSpacing(4)
-        for _v in AVAILABLE_VOICES:
-            b = QPushButton(_v)
+        self.on_preview_audio = None   # callable(bool) — MainWindow closes the mic
+        self._previewing = False
+        _combo_css = (
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
+            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+            f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
+            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}"
+        )
+        voice_row = QHBoxLayout(); voice_row.setSpacing(6)
+        self._voice_box = QComboBox()
+        self._voice_box.setFont(QFont("Courier New", 9))
+        self._voice_box.setFixedHeight(30)
+        self._voice_box.setStyleSheet(_combo_css)
+        self._voice_box.setMaxVisibleItems(14)
+        for _reg, _sym in (("female", "♀"), ("male", "♂")):
+            for _v in AVAILABLE_VOICES:
+                _char, _r = VOICE_INFO[_v]
+                if _r == _reg:
+                    self._voice_box.addItem(f"{_sym}  {_v:<14} {_char}", _v)
+        self._voice_box.setCurrentIndex(max(0, self._voice_box.findData(self._sel_voice)))
+        self._voice_box.currentIndexChanged.connect(
+            lambda _i: self._on_voice_pick(self._voice_box.currentData()))
+        voice_row.addWidget(self._voice_box, 1)
+        self._play_btn = QPushButton("▶  HEAR")
+        self._play_btn.setFixedSize(84, 30)
+        self._play_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._play_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+        """)
+        self._play_btn.clicked.connect(self._toggle_preview)
+        voice_row.addWidget(self._play_btn)
+        lay.addLayout(voice_row)
+        self._voice_note = _lbl("", 7, color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(self._voice_note)
+        self._preview_sig.connect(self._on_preview_state)
+
+        # ── HUD centrepiece ──────────────────────────────────────────────────
+        # Previewed live on the HUD behind the overlay, like the colour; CANCEL
+        # puts the original back, APPLY keeps it.
+        from memory.config_manager import HUD_STYLE_INFO, get_hud_style
+        lay.addSpacing(4)
+        lay.addWidget(_lbl("HUD STYLE  —  previews live", 8, color=C.TEXT_DIM,
+                            align=Qt.AlignmentFlag.AlignLeft))
+        self.on_hud_preview = None     # callable(style) — MainWindow wires it
+        self._initial_hud = get_hud_style()
+        self._sel_hud = self._initial_hud
+        self._hud_btns: dict[str, QPushButton] = {}
+        grid = QGridLayout(); grid.setSpacing(4)
+        for i, (_k, _label) in enumerate(HUD_STYLE_INFO.items()):
+            b = QPushButton(_label)
             b.setCheckable(True)
             b.setFixedHeight(28)
             b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda _=False, name=_v: self._on_voice_pick(name))
-            self._voice_btns[_v] = b
-            voice_row.addWidget(b)
-        lay.addLayout(voice_row)
-        self._refresh_voice_btns()
+            b.clicked.connect(lambda _=False, k=_k: self._on_hud_pick(k))
+            self._hud_btns[_k] = b
+            grid.addWidget(b, i // 3, i % 3)
+        lay.addLayout(grid)
+        self._refresh_hud_btns()
 
         # ── UI colour — colour wheel ─────────────────────────────────────────
         lay.addSpacing(4)
@@ -1766,13 +1863,62 @@ class CustomizeOverlay(QWidget):
 
     # ── voice selection ──────────────────────────────────────────────────────
     def _on_voice_pick(self, name: str):
+        if not name:
+            return
         self._sel_voice = name
-        self._refresh_voice_btns()
+        if self._previewing:
+            self._start_preview()          # already listening — follow the list
 
-    def _refresh_voice_btns(self):
-        """Highlight the selected voice pill; dim the rest."""
-        for name, b in self._voice_btns.items():
-            on = (name == self._sel_voice)
+    def _toggle_preview(self):
+        if self._previewing:
+            self._stop_preview()
+        else:
+            self._start_preview()
+
+    def _start_preview(self):
+        from core import voice_preview
+        self._previewing = True
+        self._play_btn.setText("■  STOP")
+        if self.on_preview_audio:
+            self.on_preview_audio(True)
+        voice_preview.preview(self._sel_voice, self._preview_sig.emit)
+
+    def _stop_preview(self):
+        from core import voice_preview
+        voice_preview.stop()
+        self._voice_note.setText("")
+        self._preview_done()
+
+    def _preview_done(self):
+        if self._previewing and self.on_preview_audio:
+            self.on_preview_audio(False)
+        self._previewing = False
+        self._play_btn.setText("▶  HEAR")
+
+    def _on_preview_state(self, state: str):
+        if state == "loading":
+            self._voice_note.setText(f"Generating a sample of {self._sel_voice}… "
+                                     "(first time only, ~5 s)")
+        elif state == "playing":
+            self._voice_note.setText(f"Playing {self._sel_voice}.")
+        elif state == "done":
+            self._voice_note.setText("")
+            self._preview_done()
+        elif state.startswith("error:"):
+            self._voice_note.setText("Sample unavailable — " + state[6:][:70])
+            self._preview_done()
+
+    # ── HUD style ────────────────────────────────────────────────────────────
+    def _on_hud_pick(self, style: str):
+        self._sel_hud = style
+        self._refresh_hud_btns()
+        if self.on_hud_preview:
+            self.on_hud_preview(style)
+
+    def _refresh_hud_btns(self):
+        """Highlight the selected style pill; dim the rest."""
+        for name, b in self._hud_btns.items():
+            on = (name == self._sel_hud)
             b.setChecked(on)
             if on:
                 b.setStyleSheet(f"""
@@ -1820,13 +1966,20 @@ class CustomizeOverlay(QWidget):
 
     def _cancel(self):
         # If a preview was applied, revert to the colour from launch
+        if self._previewing:
+            self._stop_preview()
         if self.on_preview and self._sel_color != self._initial_color:
             self.on_preview(self._initial_color)
+        if self.on_hud_preview and self._sel_hud != self._initial_hud:
+            self.on_hud_preview(self._initial_hud)
         self.hide()
 
     def _save(self):
+        if self._previewing:
+            self._stop_preview()
         name = self._name_input.text().strip() or "JARVIS"
         user = self._user_input.text().strip()
+        self.hud_saved.emit(self._sel_hud)
         self.saved.emit(name, user, self._sel_color or DEFAULT_UI_COLOR, self._sel_voice)
         self.hide()
 
@@ -2947,6 +3100,7 @@ class MainWindow(QMainWindow):
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
+    _vision_state_sig = pyqtSignal(bool)     # live vision on/off → drawer button
     _video_open_sig  = pyqtSignal(str, str, bool, str)  # video, title, muted, audio
     _wake_btns_sig   = pyqtSignal()          # wake state resolved off-thread
     _video_close_sig = pyqtSignal()
@@ -3232,6 +3386,7 @@ class MainWindow(QMainWindow):
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
+        self._vision_state_sig.connect(self.refresh_vision_btn)
         self._wake_btns_sig.connect(self._refresh_wake_btns)
         self._video_open_sig.connect(self._on_video_open)
         self._video_close_sig.connect(self._on_video_close)
@@ -3296,43 +3451,77 @@ class MainWindow(QMainWindow):
                 )
 
     def start_camera_stream(self) -> None:
+        """Open the webcam into the HUD. Idempotent: a stream that is already
+        running is kept rather than joined by a second one — two captures on
+        one device fail on Windows, and the loser's cleanup used to hide the
+        winner's feed."""
         self._cam_stop.clear()
-        self._cam_stream_sig.emit(True)
-        t = threading.Thread(target=self._cam_loop, daemon=True, name="cam-stream")
-        t.start()
+        th = getattr(self, "_cam_thread", None)
+        if th is not None and th.is_alive():
+            return
+        self._cam_thread = threading.Thread(target=self._cam_loop, daemon=True,
+                                            name="cam-stream")
+        self._cam_thread.start()
+
+    def camera_streaming(self) -> bool:
+        th = getattr(self, "_cam_thread", None)
+        return bool(th is not None and th.is_alive() and not self._cam_stop.is_set())
+
+    def camera_frame(self, max_age: float = 2.0) -> bytes | None:
+        """The newest webcam frame as a ~768 px JPEG, or None if there is no
+        live stream (or its last frame is older than `max_age` seconds).
+        This is what live vision sends to the model — the stream is the one
+        owner of the camera, so nothing else has to open it."""
+        latest = getattr(self, "_cam_latest", None)
+        if not latest:
+            return None
+        data, ts = latest
+        return data if time.time() - ts <= max_age else None
 
     def _cam_loop(self) -> None:
+        cap = None
         try:
             import cv2
-            # Reuse camera index detected by screen_processor (cached in api_keys.json)
-            cam_idx = 0
+            from actions.screen_processor import open_camera
             try:
-                import json as _j
-                cfg = _j.loads((CONFIG_DIR / "api_keys.json").read_text())
-                cam_idx = int(cfg.get("camera_index", 0))
-            except Exception:
-                pass
-            try:
-                backend = cv2.CAP_DSHOW if _OS == "Windows" else cv2.CAP_ANY
-            except AttributeError:
-                backend = 0
-            cap = cv2.VideoCapture(cam_idx, backend)
-            if not cap.isOpened():
-                cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
+                cap = open_camera()
+            except Exception as e:
+                # Said where the user looks, not only on a console nobody reads:
+                # the commonest cause (Windows privacy switch) is theirs to fix.
+                self._log_sig.emit(f"SYS: Camera unavailable — {e}")
+                print(f"[Camera] {e}")
                 return
-            # warm-up frames
-            for _ in range(5):
-                cap.read()
+            self._cam_stream_sig.emit(True)      # show the panel only once there is a feed
+            fails, last_vis = 0, 0.0
             while not self._cam_stop.wait(0.033) and cap.isOpened():
                 ret, frame = cap.read()
-                if ret and frame is not None:
-                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
-                    self._cam_frame_sig.emit(buf.tobytes())
-            cap.release()
+                if not ret or frame is None:
+                    fails += 1
+                    if fails > 90:               # ~3 s of nothing: the device went away
+                        self._log_sig.emit("SYS: Camera stopped delivering frames.")
+                        break
+                    continue
+                fails = 0
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+                self._cam_frame_sig.emit(buf.tobytes())
+                now = time.time()
+                if now - last_vis >= 0.5:
+                    last_vis = now
+                    h, w = frame.shape[:2]
+                    if w > 768:
+                        frame = cv2.resize(frame, (768, int(h * 768 / w)),
+                                           interpolation=cv2.INTER_AREA)
+                    _, small = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                    self._cam_latest = (small.tobytes(), now)
         except Exception as e:
             print(f"[Camera] Stream error: {e}")
         finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            self._cam_latest = None
             self._cam_stream_sig.emit(False)
 
     def stop_camera_stream(self) -> None:
@@ -4314,6 +4503,10 @@ class MainWindow(QMainWindow):
         self._hud_btn.clicked.connect(self._toggle_hud_style)
         self._refresh_hud_btn()
 
+        self._vision_btn = _row(QPushButton())
+        self._vision_btn.clicked.connect(self._toggle_live_vision)
+        self.refresh_vision_btn(getattr(self, "_vision_on", False))
+
         w.adjustSize()
         return w
 
@@ -5138,40 +5331,74 @@ class MainWindow(QMainWindow):
 
 
     def _refresh_hud_btn(self):
-        from memory.config_manager import get_hud_style
-        face = get_hud_style() == "face"
-        # Neither state is "off", so both read as active — this is a choice
-        # between two things, not a switch with a disabled side.
+        from memory.config_manager import HUD_STYLE_INFO, get_hud_style
+        cur = get_hud_style()
+        # No state is "off", so all read as active — this is a choice between
+        # looks, not a switch with a disabled side.
         style = f"""
             QPushButton {{ background: {C.PANEL2}; color: {C.PRI};
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText("🧑  HUD: ANIMATED FACE" if face
-                              else "◉  HUD: REACTOR CORE")
+        self._hud_btn.setText(f"◉  HUD: {HUD_STYLE_INFO.get(cur, cur.upper())}")
         self._hud_btn.setStyleSheet(style)
         self._hud_btn.setToolTip(
-            "An animated head that speaks your words and shows what JARVIS is "
-            "doing. Tap to switch to the reactor core."
-            if face else
-            "A reactor core that turns with the state and moves with your voice. "
-            "Tap to switch to the animated head.")
+            "Tap to cycle through the HUD styles. ⚙ → CUSTOMISE shows them all "
+            "with a live preview.")
 
-    def _toggle_hud_style(self):
-        """Swap the centrepiece. Both objects stay in memory, so the change is
-        instant and switching back costs nothing."""
-        from memory.config_manager import get_hud_style, save_hud_style
-        want = "core" if get_hud_style() == "face" else "face"
-        save_hud_style(want)
+    def _set_hud_style(self, style: str) -> None:
+        """Persist and show a centrepiece. Every renderer stays in memory once
+        built, so switching is instant and switching back costs nothing."""
+        from memory.config_manager import HUD_STYLE_INFO, get_hud_style, save_hud_style
+        changed = style != get_hud_style()
+        save_hud_style(style)
         try:
-            self.hud.hud_style = want
-            self.hud.update()
+            self.hud.set_style(style)
         except Exception:
             pass
         self._refresh_hud_btn()
-        self._log.append_log(
-            "SYS: HUD switched to the animated face." if want == "face"
-            else "SYS: HUD switched to the reactor core.")
+        if changed:
+            self._log.append_log(
+                f"SYS: HUD style — {HUD_STYLE_INFO.get(style, style).title()}.")
+
+    def refresh_vision_btn(self, on: bool) -> None:
+        """Paint the live-vision button. Called by the assistant as well, since
+        it can be switched on and off by voice."""
+        self._vision_on = bool(on)
+        btn = getattr(self, "_vision_btn", None)
+        if btn is None:
+            return
+        on_css = f"""
+            QPushButton {{ background: {C.PRI_GHO}; color: {C.PRI};
+                border: 1px solid {C.PRI}; border-radius: 3px;
+                text-align: left; padding: 0 8px; }}"""
+        off_css = f"""
+            QPushButton {{ background: {C.PANEL2}; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px;
+                text-align: left; padding: 0 8px; }}
+            QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}"""
+        btn.setText("👁  LIVE VISION: ON" if on else "👁  LIVE VISION: OFF")
+        btn.setStyleSheet(on_css if on else off_css)
+        btn.setToolTip(
+            "JARVIS is watching the webcam continuously (about one frame a "
+            "second) and can react to you like a video call. Tap to stop."
+            if on else
+            "Let JARVIS see you through the webcam in real time — it keeps "
+            "watching until you switch it off or say 'stop watching'.")
+
+    def _toggle_live_vision(self):
+        cb = getattr(self, "on_live_vision", None)
+        if cb:
+            cb(not getattr(self, "_vision_on", False))
+        else:
+            self._log.append_log("SYS: Live vision is not available yet.")
+
+    def _toggle_hud_style(self):
+        """Drawer button: step to the next style in picker order."""
+        from memory.config_manager import HUD_STYLES, get_hud_style
+        cur = get_hud_style()
+        i = HUD_STYLES.index(cur) if cur in HUD_STYLES else -1
+        self._set_hud_style(HUD_STYLES[(i + 1) % len(HUD_STYLES)])
 
     def _toggle_ptt(self):
         from memory.config_manager import (get_push_to_talk_enabled,
@@ -5320,9 +5547,30 @@ class MainWindow(QMainWindow):
             ow, oh,
         )
         ov.on_preview = self._preview_ui_color
+        ov.on_hud_preview = self._preview_hud_style
+        ov.on_preview_audio = self._voice_sample_playing
+        ov.hud_saved.connect(self._set_hud_style)
         ov.saved.connect(self._apply_name_update)
         ov.show()
         self._customize_overlay = ov
+
+    def _voice_sample_playing(self, playing: bool) -> None:
+        """Close the mic while a voice sample plays, so JARVIS does not answer
+        its own audition. Same rule as the video: only reopen a mic that this
+        closed — one the user muted themselves stays muted."""
+        if playing and not self._muted:
+            self._sample_auto_muted = True
+            self._set_muted(True, "Playing a voice sample.")
+        elif not playing and getattr(self, "_sample_auto_muted", False):
+            self._sample_auto_muted = False
+            self._set_muted(False)
+
+    def _preview_hud_style(self, style: str) -> None:
+        """Show a centrepiece on the HUD without saving it."""
+        try:
+            self.hud.set_style(style)
+        except Exception:
+            pass
 
     def _preview_ui_color(self, hex_color: str):
         """Live preview — paints the whole interface the new colour (does NOT write to config)."""
@@ -5716,10 +5964,14 @@ class JarvisUI:
             pass
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
-        """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
+        """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance).
+
+        Forwarded to the canvas: this wrapper has no avatar of its own, and the
+        old `self._avatar` lookup raised AttributeError into the except below on
+        every call, so the glance never happened. Like set_audio_level it only
+        stores a tuple, so no signal is needed."""
         try:
-            if self._avatar is not None:
-                self._avatar.glance(dx, dy, hold)
+            self._win.hud.glance(dx, dy, hold)
         except Exception:
             pass
 
@@ -5832,6 +6084,26 @@ class JarvisUI:
     def start_camera_stream(self) -> None:
         """Thread-safe: start live camera feed in the full HUD area."""
         self._win.start_camera_stream()
+
+    def camera_streaming(self) -> bool:
+        """Thread-safe: True while the webcam stream is running."""
+        return self._win.camera_streaming()
+
+    def camera_frame(self, max_age: float = 2.0) -> bytes | None:
+        """Thread-safe: newest webcam frame as JPEG, or None."""
+        return self._win.camera_frame(max_age)
+
+    def set_live_vision(self, on: bool) -> None:
+        """Thread-safe: reflect the live-vision state on the drawer button."""
+        self._win._vision_state_sig.emit(bool(on))
+
+    @property
+    def on_live_vision(self):
+        return getattr(self._win, "on_live_vision", None)
+
+    @on_live_vision.setter
+    def on_live_vision(self, cb):
+        self._win.on_live_vision = cb
 
     def stop_camera_stream(self) -> None:
         """Thread-safe: stop the live camera feed."""

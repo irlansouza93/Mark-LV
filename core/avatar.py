@@ -21,6 +21,14 @@ Design notes
 
 The renderer is theme-agnostic: `paint()` takes its colours as arguments, which
 is what lets the HueWheel accent picker retint the avatar for free.
+
+Variants (`HoloAvatar(variant)`) share every animation path — lip-sync, gaze,
+blinks, state expressions — and differ only in the mesh they pose and a few
+extra layers they paint:
+  * "female"  — reshaped face, long hair drawn as strands, lashes, fuller lips;
+  * "wakanda" — a panther mask in its own fixed palette (graphite weave, silver
+                lines, violet kinetic glow that rises with the voice), lens eyes,
+                pointed ears and a claw necklace.
 """
 
 from __future__ import annotations
@@ -31,6 +39,13 @@ import random
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QRadialGradient
+
+# The panther's palette is part of the character, not of the theme: a violet
+# mask in the user's cyan would be a different costume. Muting still greys it.
+_WK_SKIN = QColor(78, 72, 104)       # graphite weave
+_WK_WIRE = QColor(122, 116, 156)     # the weave's own lines
+_WK_SILVER = QColor(214, 214, 230)   # raised pattern, necklace, lenses
+_WK_KINETIC = QColor(168, 92, 255)   # vibranium glow — follows the voice
 
 from core.avatar_mesh import JAW_MAX, JAW_PIVOT, get_head_mesh
 
@@ -124,8 +139,14 @@ class HoloAvatar:
     # see-through glass wireframe. Flip here, or per instance.
     shaded = True
 
-    def __init__(self) -> None:
-        mesh = get_head_mesh()
+    def __init__(self, variant: str = "base") -> None:
+        self.variant = variant if variant in ("base", "female", "wakanda") else "base"
+        mesh = get_head_mesh(self.variant)
+        self._hair = mesh.get("hair")
+        self._pattern = mesh.get("pattern")
+        self._necklace = mesh.get("necklace")
+        self._muted = False
+        self._rot = np.eye(3, dtype=np.float32)
         self._v0 = mesh["verts"]
         self._n0 = mesh["normals"]
         self._jaw = mesh["jaw"]
@@ -145,8 +166,10 @@ class HoloAvatar:
         lips_in = mesh["landmarks"]["lips_in"]
         self._lip_up = np.concatenate([lips_in[10:], lips_in[:1]])
 
-        # Crown (+1.0) down to the bottom of the neck, in head-half-heights.
-        # Callers size the head to the room they have with this.
+        # Top of the silhouette (the crown at +1.0, or the panther's ear tips)
+        # down to the bottom of the neck, in head-half-heights. Callers size
+        # the head to the room they have with these.
+        self.TOP = mesh["span"][0]
         self.SPAN = mesh["span"][0] - mesh["span"][1]
 
         self._lut_cache: list = []
@@ -262,6 +285,7 @@ class HoloAvatar:
         """
         dt = max(0.001, min(0.10, float(dt)))
         self._t += dt
+        self._muted = bool(muted)
         t = self._t
         amp = max(0.0, min(1.0, float(amp)))
         live = speaking and not muted
@@ -463,6 +487,7 @@ class HoloAvatar:
             [sp * sy, cp, -sp * cy],
             [-cp * sy, sp, cp * cy],
         ], dtype=np.float32)
+        self._rot = m
 
         return v @ m.T, self._n0 @ m.T
 
@@ -489,12 +514,16 @@ class HoloAvatar:
         amp = self._glow
         verts, norms = self._pose()
 
+        wk = self.variant == "wakanda"
+        wk_live = wk and not self._muted
+        aura = _WK_KINETIC if wk_live else primary
+
         # ── aura ────────────────────────────────────────────────────────────
         ar = r * 1.95
         grad = QRadialGradient(cx, cy, ar)
-        grad.setColorAt(0.00, _c(primary, 34 + 66 * amp))
-        grad.setColorAt(0.38, _c(primary, 20 + 40 * amp))
-        grad.setColorAt(1.00, _c(primary, 0))
+        grad.setColorAt(0.00, _c(aura, 34 + 66 * amp))
+        grad.setColorAt(0.38, _c(aura, 20 + 40 * amp))
+        grad.setColorAt(1.00, _c(aura, 0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(grad))
         p.drawEllipse(QRectF(cx - ar, cy - ar, ar * 2, ar * 2))
@@ -506,9 +535,20 @@ class HoloAvatar:
         xs = cx + verts[:, 0] * k
         ys = cy - verts[:, 1] * k
 
+        if wk:
+            skin = _WK_SKIN if wk_live else primary
+            if self.shaded:
+                self._paint_surface(p, xs, ys, norms, verts, skin, bg, amp)
+            self._paint_wire(p, xs, ys, norms, verts,
+                             _WK_WIRE if wk_live else primary, bg, amp * 0.6)
+            self._paint_mask(p, xs, ys, norms, cx, cy, k, r, primary, bg, amp, wk_live)
+            return
+
         if self.shaded:
             self._paint_surface(p, xs, ys, norms, verts, primary, bg, amp)
         self._paint_wire(p, xs, ys, norms, verts, primary, bg, amp)
+        if self._hair is not None:
+            self._paint_hair(p, cx, cy, r, primary, bg, amp)
         self._paint_features(p, xs, ys, norms, r, primary, accent, bg, amp)
 
     def _paint_surface(self, p: QPainter, xs, ys, norms, verts,
@@ -662,6 +702,8 @@ class HoloAvatar:
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(_c(primary, 210 * face), 1.3))      # lid line
             p.drawPolygon(poly)
+            if self.variant == "female":
+                self._paint_lashes(p, ex, ey, r, primary, face)
 
             if vis > 0.35:
                 br = poly.boundingRect()
@@ -685,6 +727,13 @@ class HoloAvatar:
         # ── mouth ───────────────────────────────────────────────────────────
         inner = self._ring(xs, ys, lm["lips_in"])
         open_h = inner.boundingRect().height()
+
+        if self.variant == "female":
+            # Fuller lips read from tone as much as from shape: a soft fill
+            # across the whole lip area, warmed with the accent.
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(_c(accent, (46 + 30 * amp) * face)))
+            p.drawPolygon(self._ring(xs, ys, lm["lips_out"]))
 
         p.setPen(Qt.PenStyle.NoPen)
         if self._mouth > 0.02:
@@ -713,3 +762,163 @@ class HoloAvatar:
         p.drawPolygon(inner)                       # lip edge
         p.setPen(QPen(_c(primary, 110 * face), 1.1))
         p.drawPolygon(self._ring(xs, ys, lm["lips_out"]))
+
+    # ── variant layers ──────────────────────────────────────────────────────
+
+    def _project(self, pts: np.ndarray, cx: float, cy: float, r: float):
+        """Head-local points → posed screen coordinates (no jaw, no brows)."""
+        q = pts.reshape(-1, 3) @ self._rot.T
+        w = np.maximum(_CAM_D - q[:, 2], 0.35)
+        k = (_CAM_D / w) * r
+        return cx + q[:, 0] * k, cy - q[:, 1] * k, q
+
+    def _paint_lashes(self, p: QPainter, ex, ey, r: float,
+                      primary: QColor, face: float) -> None:
+        """A heavier upper lid and a few lashes flicking up at the outer corner.
+
+        The ring's second half (indices 9..15) is the upper lid. Lashes are
+        short strokes leaving it upwards and outwards, longest at the corner —
+        the single detail that most reads as 'feminine' at HUD size.
+        """
+        ux, uy = ex[8:], ey[8:]
+        if len(ux) < 3:
+            return
+        p.setPen(QPen(_c(primary, 235 * face), 2.1))
+        p.drawPolyline(QPolygonF([QPointF(float(a), float(b)) for a, b in zip(ux, uy)]))
+        mid_x = float(ex.mean())
+        lines = []
+        n = len(ux)
+        for i in range(n):
+            out = (float(ux[i]) - mid_x)
+            frac = i / max(1, n - 1)
+            reach = r * (0.020 + 0.035 * abs(out) / max(1.0, float(np.ptp(ex)) * 0.5))
+            dx = np.sign(out) * reach * 0.6
+            lines.append(QLineF(float(ux[i]), float(uy[i]),
+                                float(ux[i]) + dx, float(uy[i]) - reach * (0.6 + 0.4 * frac)))
+        p.setPen(QPen(_c(primary, 170 * face), 1.1))
+        p.drawLines(lines)
+
+    def _paint_hair(self, p: QPainter, cx: float, cy: float, r: float,
+                    primary: QColor, bg: QColor, amp: float) -> None:
+        """Long hair as strands of light, culled where they turn away."""
+        h = self._hair
+        n, m, _ = h["pts"].shape
+        xs, ys, q = self._project(h["pts"], cx, cy, r)
+        nz = (h["nrm"].reshape(-1, 3) @ self._rot.T)[:, 2]
+        xs, ys = xs.reshape(n, m), ys.reshape(n, m)
+        nz = nz.reshape(n, m)
+        y_loc = h["pts"][:, :, 1]
+
+        # Facing, plus a shimmer that rides the same scan sweep as the face.
+        a = np.clip(0.20 + 0.80 * nz, 0.0, 1.0)
+        a += 0.35 * np.exp(-((y_loc - self._scan) / 0.14) ** 2) * (nz > -0.1)
+        a *= h["w"][:, None] * (0.85 + 0.30 * amp)
+        seg_a = 0.5 * (a[:, :-1] + a[:, 1:])
+        keep = seg_a > 0.07
+
+        # Same batching as the wireframe: sort the kept segments by opacity
+        # bucket once, build every QLineF from one .tolist(), slice per bucket.
+        quad = np.stack([xs[:, :-1], ys[:, :-1], xs[:, 1:], ys[:, 1:]], axis=2)[keep]
+        bi = np.clip((seg_a[keep] * _BUCKETS).astype(np.int32), 0, _BUCKETS - 1)
+        order = np.argsort(bi, kind="stable")
+        bounds = np.searchsorted(bi[order], np.arange(_BUCKETS + 1))
+        lines = [QLineF(*q) for q in quad[order].tolist()]
+        buckets = [lines[int(bounds[b]):int(bounds[b + 1])] for b in range(_BUCKETS)]
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Two passes: a wide, faint body first so the strands read as a mass of
+        # hair rather than as wires, then the strands themselves on top.
+        # Only the strands facing the viewer get a body, and every other one is
+        # enough — the wide translucent pass is the costly part of this layer.
+        body = [ln for seg in buckets[2:] for ln in seg[::2]]
+        if body:
+            p.setPen(QPen(_c(primary, 30 + 18 * amp), max(3.0, r * 0.026),
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            p.drawLines(body)
+        for b, seg in enumerate(buckets):
+            if seg:
+                p.setPen(QPen(_blend(bg, primary, 255.0 * (b + 0.6) / _BUCKETS), 1.15))
+                p.drawLines(seg)
+
+    def _paint_mask(self, p: QPainter, xs, ys, norms, cx: float, cy: float,
+                    k, r: float, primary: QColor, bg: QColor, amp: float,
+                    live: bool) -> None:
+        """The panther: raised silver lines, lens eyes, mouth seam, necklace.
+
+        The kinetic glow is the voice made visible — it sits at a low idle
+        level and swells along every line as the assistant speaks, which also
+        does the job a moving mouth does on the other faces.
+        """
+        silver = _WK_SILVER if live else primary
+        kin = _WK_KINETIC if live else primary
+        face = max(0.0, math.cos(self._yaw) * math.cos(self._pitch)) ** 2
+        glow = 0.25 + 0.75 * min(1.0, amp * 1.6)
+        lm = self._lm
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # ── raised pattern ─────────────────────────────────────────────────
+        nz = norms[:, 2]
+        for path in self._pattern:
+            vis = float(np.clip(nz[path].mean() * 1.4, 0.0, 1.0))
+            if vis < 0.05:
+                continue
+            poly = QPolygonF([QPointF(float(xs[i]), float(ys[i])) for i in path])
+            p.setPen(QPen(_c(kin, 90 * glow * vis), 4.0))
+            p.drawPolyline(poly)
+            p.setPen(QPen(_c(silver, (150 + 90 * glow) * vis), 1.4))
+            p.drawPolyline(poly)
+
+        # ── mouth seam ─────────────────────────────────────────────────────
+        p.setPen(QPen(_c(silver, 70 * face), 1.0))
+        p.drawPolygon(self._ring(xs, ys, lm["lips_out"]))
+        if self._mouth > 0.02:
+            p.setPen(QPen(_c(kin, (90 + 140 * self._mouth) * face), 2.0))
+            p.drawPolygon(self._ring(xs, ys, lm["lips_in"]))
+
+        # ── lens eyes ──────────────────────────────────────────────────────
+        if face > 0.02:
+            vis = max(0.12, 1.0 - self._blink) * (0.35 + 0.65 * self._lids)
+            head_x = cx + self._yaw * r * 0.0
+            for key in ("eye_l", "eye_r"):
+                idx = lm[key]
+                ex, ey = xs[idx], ys[idx]
+                ecx, ecy = float(ex.mean()), float(ey.mean())
+                w = float(np.ptp(ex)) * 0.5
+                hh = max(1.0, float(np.ptp(ey)) * 0.5)
+                out = 1.0 if ecx > head_x else -1.0
+                # An angular, upswept lens: inner corner low, outer tip raised
+                # and extended past the eye — the mask's look, not an eye.
+                pts = [(-1.05, 0.15), (-0.55, -1.25), (0.55, -1.55),
+                       (1.55, -1.85), (0.75, 0.95), (-0.45, 1.05)]
+                poly = QPolygonF([QPointF(ecx + out * px * w,
+                                          ecy + py * hh * 1.25 * vis)
+                                  for px, py in pts])
+                g = QRadialGradient(ecx + out * w * 0.3, ecy, w * 2.2)
+                g.setColorAt(0.0, _c(silver, 120 * face))
+                g.setColorAt(1.0, _c(silver, 0))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(g))
+                p.drawEllipse(QPointF(ecx + out * w * 0.3, ecy), w * 2.2, w * 1.6)
+                p.setBrush(QBrush(_c(silver, (200 + 55 * glow) * face)))
+                p.setPen(QPen(_c(kin, 160 * face), 1.2))
+                p.drawPolygon(poly)
+
+        # ── claw necklace ──────────────────────────────────────────────────
+        nk = self._necklace
+        if nk is not None:
+            bx, by, _ = self._project(nk["base"], cx, cy, r)
+            tx, ty, _ = self._project(nk["tip"], cx, cy, r)
+            on = (nk["nrm"] @ self._rot.T)[:, 2]
+            bx, by = bx.reshape(-1, 2), by.reshape(-1, 2)
+            for i in np.argsort(on):
+                if on[i] < -0.05:
+                    continue
+                a = float(np.clip(on[i], 0.0, 1.0))
+                poly = QPolygonF([QPointF(float(bx[i, 0]), float(by[i, 0])),
+                                  QPointF(float(tx[i]), float(ty[i])),
+                                  QPointF(float(bx[i, 1]), float(by[i, 1]))])
+                p.setBrush(QBrush(_blend(bg, silver, 60 + 80 * a)))
+                p.setPen(QPen(_c(silver, 120 + 120 * a), 1.1))
+                p.drawPolygon(poly)
+                p.setPen(QPen(_c(kin, 120 * glow * a), 2.4))
+                p.drawLine(QLineF(float(bx[i].mean()), float(by[i].mean()),
+                                  float(tx[i]), float(ty[i])))

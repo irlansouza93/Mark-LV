@@ -76,9 +76,47 @@ def save_assistant_config(assistant_name: str, user_name: str) -> None:
 
 
 # ── Assistant voice ──────────────────────────────────────────────────────────
-# Gemini Live prebuilt voices. Names are proper nouns — identical in every
-# language, so this list is safe to show verbatim in any locale.
-AVAILABLE_VOICES = ["Charon", "Puck", "Kore", "Fenrir", "Aoede"]
+# Every prebuilt voice the Gemini Live API accepts in `voice_name` — all 30, not
+# the five the picker used to offer. They are the same voices the native-audio
+# Live models speak with, so none of them is a robotic TTS fallback; they differ
+# in timbre and delivery, which is what the one-word character below describes
+# (Google's own descriptor). The register is by ear, not from Google — the
+# picker plays a sample, so a wrong guess costs one click. Names are proper nouns — identical in every
+# language, so the list is safe to show verbatim in any locale.
+VOICE_INFO: dict[str, tuple[str, str]] = {
+    # name:          (character,        register)
+    "Charon":        ("Informative",    "male"),
+    "Puck":          ("Upbeat",         "male"),
+    "Fenrir":        ("Excitable",      "male"),
+    "Orus":          ("Firm",           "male"),
+    "Enceladus":     ("Breathy",        "male"),
+    "Iapetus":       ("Clear",          "male"),
+    "Umbriel":       ("Easy-going",     "male"),
+    "Algieba":       ("Smooth",         "male"),
+    "Algenib":       ("Gravelly",       "male"),
+    "Rasalgethi":    ("Informative",    "male"),
+    "Alnilam":       ("Firm",           "male"),
+    "Schedar":       ("Even",           "male"),
+    "Achird":        ("Friendly",       "male"),
+    "Zubenelgenubi": ("Casual",         "male"),
+    "Sadachbia":     ("Lively",         "male"),
+    "Sadaltager":    ("Knowledgeable",  "male"),
+    "Kore":          ("Firm",           "female"),
+    "Aoede":         ("Breezy",         "female"),
+    "Zephyr":        ("Bright",         "female"),
+    "Leda":          ("Youthful",       "female"),
+    "Callirrhoe":    ("Easy-going",     "female"),
+    "Autonoe":       ("Bright",         "female"),
+    "Despina":       ("Smooth",         "female"),
+    "Erinome":       ("Clear",          "female"),
+    "Laomedeia":     ("Upbeat",         "female"),
+    "Achernar":      ("Soft",           "female"),
+    "Pulcherrima":   ("Forward",        "female"),
+    "Vindemiatrix":  ("Gentle",         "female"),
+    "Sulafat":       ("Warm",           "female"),
+    "Gacrux":        ("Mature",         "female"),
+}
+AVAILABLE_VOICES = list(VOICE_INFO)
 DEFAULT_VOICE    = "Charon"
 
 
@@ -130,16 +168,27 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
-HUD_STYLES = ("face", "core")
+# Every centrepiece the HUD can draw, in picker order, with its display label.
+# "face" and "core" are the originals; the rest are rendered by the same
+# software painter (core/avatar.py variants and core/holo_viz.py), so switching
+# costs no reload and no GPU.
+HUD_STYLE_INFO: dict[str, str] = {
+    "face":    "NATIVE FACE",
+    "female":  "FEMALE FACE",
+    "wakanda": "PANTHER",
+    "orb":     "HOLO ORB",
+    "holo":    "HOLO PROJECTOR",
+    "core":    "REACTOR CORE",
+}
+HUD_STYLES = tuple(HUD_STYLE_INFO)
 
 
 def get_hud_style() -> str:
-    """Which centrepiece the HUD draws: the animated head, or the reactor core.
+    """Which centrepiece the HUD draws — one of HUD_STYLES.
 
-    Taste, not capability — both render in the same software painter and cost
-    about the same. Defaults to the head because that is what MARK LIV shipped
-    with; anyone who preferred the older look can switch back in ⚙ and the
-    choice survives a restart.
+    Taste, not capability — all of them render in the same software painter and
+    cost about the same. Defaults to the head because that is what MARK LIV
+    shipped with; the choice survives a restart.
     """
     v = str(load_api_keys().get("hud_style", "face")).strip().lower()
     return v if v in HUD_STYLES else "face"
