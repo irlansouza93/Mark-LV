@@ -20,6 +20,13 @@ requests>=2.31,<3
 beautifulsoup4>=4.12,<5
 playwright>=1.40,<2
 
+# ── Holographic HUD on the GPU ────────────────────────────────────────────────
+# Renders the hologram (light sprites, bloom, scanlines) off-screen through
+# OpenGL 3.3 and hands the frame to the ordinary QPainter HUD. Optional: without
+# it, or without a GL 3.3 driver, the same scene renders in numpy at a capped
+# resolution (core/holo_engine.py).
+moderngl>=5.10,<6
+
 # ── Video on the HUD ──────────────────────────────────────────────────────────
 # Qt plays local files and direct media URLs on its own — QtMultimedia comes
 # with PyQt6, so the player itself costs nothing. A YouTube page is not a video

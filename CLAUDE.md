@@ -16,8 +16,11 @@ Assistente pessoal de IA por voz em tempo real (Windows/macOS/Linux), em Python 
 |---|---|
 | `main.py` | `JarvisLive`: sessão Gemini Live, loops asyncio (mic, envio, recepção, playback), ferramentas "inline" (`screen_process`, `close_camera`, `live_camera`, memória, monitor, shutdown), reconexão/retomada de sessão |
 | `ui.py` | Toda a interface Qt (~6 mil linhas). `HudCanvas` = centro do HUD; `MainWindow` = janela; `JarvisUI` = fachada **thread-safe** usada pelo `main.py` (sempre via `pyqtSignal`, nunca tocar widget fora da thread Qt) |
-| `core/avatar.py`, `core/avatar_mesh.py` | Cabeça holográfica em software (QPainter + numpy, sem GPU) sobre a malha canônica do MediaPipe. Variantes: `base`, `female`, `wakanda` |
-| `core/holo_viz.py` | Visualizadores de voz 3D: `HoloOrb`, `HoloProjector` |
+| `core/holo_engine.py`, `core/holo_gpu.py` | Motor de holograma: luz aditiva, bloom, scanlines, aberração. `make_buffer()` devolve o backend GPU (moderngl, offscreen) ou o numpy — mesma API (`points/lines/polyline/disc/compose`) |
+| `core/holo_head.py` | `HoloHead`: a cabeça como nuvem de luz (herda animação/lip-sync de `HoloAvatar`) |
+| `core/holo_viz.py` | Visualizadores de voz: `HoloOrb`, `HoloProjector` |
+| `core/mesh_import.py` | Importa OBJ/GLB de `assets/avatars/` como estilo de HUD (`model:<nome>`), com sidecar JSON opcional |
+| `core/avatar.py`, `core/avatar_mesh.py` | Animação/rig da cabeça e malha canônica do MediaPipe; o desenho chapado antigo fica só como fallback |
 | `core/gemini.py` | "Escada" de modelos para chamadas one-shot (cooldown por tipo de falha, timeout obrigatório). Toda chamada one-shot ao Gemini passa por aqui |
 | `core/voice_preview.py` | Amostras de voz para o seletor (TTS do Gemini, cache em `config/voice_cache/`) |
 | `actions/*.py` | Habilidades embutidas: cada arquivo expõe um dict `TOOL` com `handler` e é auto-descoberto por `core/action_loader.py` |
@@ -31,7 +34,8 @@ Assistente pessoal de IA por voz em tempo real (Windows/macOS/Linux), em Python 
 - **Multiplataforma sempre**: nada que assuma Windows sem ramo para macOS/Linux; deps só de Windows levam marcador `sys_platform`.
 - **Dependência nova só com justificativa**, e importada dentro de `try/except` no ponto de uso para que a falta dela desligue só um recurso.
 - **Nada bloqueia a thread Qt**: trabalho lento vai para thread/executor e volta por sinal.
-- HUD: novos estilos implementam `step(dt, amp, speaking=, muted=, state=, **kw)` e `paint(p, cx, cy, r, primary, accent, bg, W, H)`, recebem as cores como argumento (o tema é ao vivo) e são registrados em `HUD_STYLE_INFO` (`memory/config_manager.py`) e `HudCanvas._renderer` (`ui.py`).
+- HUD: novos estilos implementam `step(dt, amp, speaking=, muted=, state=, **kw)` e `paint(p, cx, cy, r, primary, accent, bg, W, H)`, recebem as cores como argumento (o tema é ao vivo), desenham via `make_buffer()` (nunca polígono opaco — holograma é luz aditiva) e são registrados em `HUD_STYLE_INFO` (`memory/config_manager.py`) e `HudCanvas._renderer` (`ui.py`). Orçamento: < 15 ms/quadro em GPU no tamanho real da tela (r≈330 px).
+- Textos de UI novos em pt-BR quando o usuário pedir explicitamente (ex.: painel VOZ E JEITO); o resto da UI segue em inglês até uma tradução completa.
 - Nova habilidade embutida = um arquivo em `actions/` com `TOOL`. Toda declaração vai para o modelo em **toda** conexão (custa tokens): descrição curta e precisa.
 
 ## Armadilhas conhecidas

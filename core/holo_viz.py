@@ -1,28 +1,25 @@
 """
 Holographic voice visualisers for the HUD centre — the two non-face styles.
 
-Both follow the rules the avatar and the reactor core set:
+Both are drawn as light through `core.holo_engine` / `core.holo_gpu` (additive
+sprites and lines, a bloom pyramid, scanlines, optical fringing — see those
+modules for why), and both follow the rules the avatar and the reactor set:
 
-* **Software rendered.** QPainter and numpy only — no OpenGL context, no GPU,
-  no new dependency. The point clouds are projected with the same perspective
-  camera the head uses.
-* **Everything moves for a reason.** Rotation speed is the assistant's state
-  (idle drifts, thinking hurries, speaking runs); size and brightness are the
-  real audio level the HUD already smooths for the waveform.
-* **Theme-agnostic.** `paint()` takes its colours as arguments, so the hue wheel
-  retints them like everything else.
+* **Everything moves for a reason.** Spin is the assistant's state (idle
+  drifts, thinking hurries, speaking runs); size, ripple and brightness are the
+  real audio level the HUD already smooths for its waveform.
+* **Theme-agnostic.** Colours arrive as arguments, so the hue wheel retints.
 
 Shared lifecycle with `HoloAvatar`:
     viz.step(dt, amp, speaking=..., muted=..., state=...)   # every tick
-    viz.paint(painter, cx, cy, r, primary, accent, bg)      # every frame
+    viz.paint(painter, cx, cy, r, primary, accent, bg, W, H)
 
-Styles
-------
-`HoloOrb`        — a sphere of light points that ripples outward with the voice,
-                   wired to its neighbours, inside three tilted orbit rings.
-`HoloProjector`  — a projector base casting a beam, and above it a 3-D sculpture
-                   of the voice's recent history: one ring per moment, newest at
-                   the emitter, rising and fading as it ages.
+`HoloOrb`        — an energy sphere of light points with a bright limb, a hot
+                   core, orbit rings carrying comets, and a spectrum ring that
+                   is the voice.
+`HoloProjector`  — an emitter casting a beam, and in it a sculpture of the
+                   voice's recent history: one ring per moment, newest at the
+                   emitter, rising and fading as it ages.
 """
 
 from __future__ import annotations
@@ -31,27 +28,13 @@ import math
 from collections import deque
 
 import numpy as np
-from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
-from PyQt6.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPen,
-                         QPolygonF, QRadialGradient)
+from PyQt6.QtGui import QColor, QPainter
 
-_CAM_D = 4.2       # perspective camera distance, in units of the shape radius
-_BUCKETS = 5       # opacity buckets: lines and points draw in a few batched calls
+from core.holo_engine import budget_scale, draw_additive
+from core.holo_gpu import make_buffer
 
-
-def _c(col: QColor, a: float) -> QColor:
-    q = QColor(col)
-    q.setAlpha(int(max(0.0, min(255.0, a))))
-    return q
-
-
-def _blend(bg: QColor, col: QColor, a: float) -> QColor:
-    """`col` at alpha `a` (0..1) pre-mixed onto `bg`, returned opaque — Qt's
-    opaque line path is several times faster than its blended one."""
-    f = max(0.0, min(1.0, a))
-    return QColor(int(bg.red() + (col.red() - bg.red()) * f),
-                  int(bg.green() + (col.green() - bg.green()) * f),
-                  int(bg.blue() + (col.blue() - bg.blue()) * f))
+_CAM_D = 4.2
+_PRI, _ACC = 0, 1
 
 
 def _rot(yaw: float, pitch: float) -> np.ndarray:
@@ -60,12 +43,6 @@ def _rot(yaw: float, pitch: float) -> np.ndarray:
     return np.array([[cy, 0.0, sy],
                      [sp * sy, cp, -sp * cy],
                      [-cp * sy, sp, cp * cy]], dtype=np.float32)
-
-
-def _project(q: np.ndarray, cx: float, cy: float, r: float):
-    w = np.maximum(_CAM_D - q[:, 2], 0.4)
-    k = (_CAM_D / w) * r
-    return cx + q[:, 0] * k, cy - q[:, 1] * k
 
 
 class _Base:
@@ -81,6 +58,7 @@ class _Base:
         self._speaking = False
         self._muted = False
         self._state = ""
+        self._buf = make_buffer(2)
 
     def glance(self, *_a, **_k) -> None:      # the HUD may call this on any style
         pass
@@ -96,22 +74,28 @@ class _Base:
         thinking = self._state in ("THINKING", "PROCESSING")
         asleep = self._state in ("SLEEPING", "STANDBY", "OFFLINE")
         # Integrated, never wall-clock × rate: a rate change must not jump the
-        # phase (the same lesson the head's sway and the core's rings taught).
-        rate = 0.18 if asleep else (0.32 + (0.9 if thinking else 0.0)
-                                    + (0.45 if speaking else 0.0))
+        # phase (the lesson the head's sway and the core's rings taught).
+        rate = 0.15 if asleep else (0.30 + (0.9 if thinking else 0.0)
+                                    + (0.40 if speaking else 0.0))
         self._spin += dt * rate
         self._advance(dt, amp)
 
     def _advance(self, dt: float, amp: float) -> None:
         pass
 
+    def _finish(self, p: QPainter, x0: float, y0: float, primary: QColor,
+                accent: QColor, sc: float, exposure: float = 1.0,
+                bloom: float = 0.5) -> None:
+        img = self._buf.compose([primary, accent], self._t, exposure=exposure,
+                                bloom=bloom, scan=0.14, aberration=1)
+        draw_additive(p, img, x0, y0, sc)
+
 
 class HoloOrb(_Base):
-    """A sphere of light that breathes with the voice."""
+    """An energy sphere that breathes with the voice."""
 
-    def __init__(self, n: int = 460) -> None:
+    def __init__(self, n: int = 5200) -> None:
         super().__init__()
-        # Fibonacci sphere: evenly spread points with no seam or pole cluster.
         i = np.arange(n, dtype=np.float32) + 0.5
         phi = np.arccos(1.0 - 2.0 * i / n)
         theta = np.pi * (1.0 + 5.0 ** 0.5) * i
@@ -119,117 +103,112 @@ class HoloOrb(_Base):
                              np.sin(theta) * np.sin(phi)], axis=1).astype(np.float32)
         self._lat = phi.astype(np.float32)
         self._lon = (theta % (2 * np.pi)).astype(np.float32)
-
-        # Neighbour wiring, computed once: each point to its 3 nearest. Kept
-        # sparse — a dense plexus at this size reads as grey fog.
-        d = np.linalg.norm(self._p0[:, None, :] - self._p0[None, :, :], axis=2)
-        np.fill_diagonal(d, 9.0)
-        nn = np.argsort(d, axis=1)[:, :3]
-        pairs = {(min(a, b), max(a, b)) for a in range(n) for b in nn[a]}
-        e = np.array(sorted(pairs), dtype=np.int32)
-        self._e0, self._e1 = e[:, 0], e[:, 1]
-
-        # Three orbit rings, each a tilted circle with a travelling marker.
-        a = np.linspace(0.0, 2 * np.pi, 96, endpoint=False, dtype=np.float32)
-        self._ring = np.stack([np.cos(a), np.zeros_like(a), np.sin(a)], axis=1)
-        self._rings = ((1.42, 0.42, 0.0, 1.0), (1.62, -0.28, 1.2, -0.7),
-                       (1.86, 1.15, 2.1, 0.45))     # radius, tilt, yaw, speed
-
-    def _shape(self) -> np.ndarray:
-        """Sphere displaced outward by a travelling interference pattern whose
-        depth is the voice — still and round when silent, rippling when not."""
-        t = self._t
-        g = self._glow
-        wave = (np.sin(self._lat * 5.0 + t * 2.4) * np.cos(self._lon * 3.0 - t * 1.7)
-                + 0.6 * np.sin(self._lat * 9.0 - t * 3.1 + self._lon * 2.0))
-        r = 1.0 + 0.012 * math.sin(t * 1.3) + (0.05 + 0.24 * g) * g * wave
-        return self._p0 * r[:, None].astype(np.float32)
+        self._jit = np.random.default_rng(2).random(n).astype(np.float32)
+        a = np.linspace(0.0, 2 * np.pi, 160, endpoint=False, dtype=np.float32)
+        self._circle = np.stack([np.cos(a), np.zeros_like(a), np.sin(a)], axis=1)
+        # radius, tilt, yaw offset, speed — three orbits at distinct angles.
+        self._rings = ((1.32, 0.42, 0.0, 1.0), (1.50, -0.30, 1.2, -0.7),
+                       (1.72, 1.12, 2.1, 0.45))
+        rng = np.random.default_rng(9)
+        self._motes = rng.random((260, 4)).astype(np.float32)
 
     def paint(self, p: QPainter, cx: float, cy: float, r: float,
               primary: QColor, accent: QColor, bg: QColor | None = None,
               W: float = 0.0, H: float = 0.0) -> None:
-        bg = bg or QColor(0, 0, 0)
-        g = self._glow
-        r *= 0.50                                     # rings reach 1.86 r
-        R = _rot(self._spin, 0.38 + 0.08 * math.sin(self._t * 0.21))
+        t, g = self._t, self._glow
+        x0, y0 = cx - r, cy - r
+        buf = self._buf
+        sc = budget_scale(buf, r, cap=200.0)
+        r = r * sc
+        size = int(2.0 * r)
+        buf.begin(size, size)
+        ox = oy = r                      # orb centre inside the buffer
+        rs = r * 0.40                    # sphere radius in px
+        R = _rot(self._spin, 0.36 + 0.08 * math.sin(t * 0.21))
 
-        # Core light — the orb's body before any point is read.
-        for gr, a in ((r * 1.9, 0.20), (r * 0.9, 0.30 + 0.35 * g)):
-            grad = QRadialGradient(cx, cy, gr)
-            grad.setColorAt(0.0, _c(primary, 255 * a))
-            grad.setColorAt(0.55, _c(primary, 255 * a * 0.35))
-            grad.setColorAt(1.0, _c(primary, 0))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(grad))
-            p.drawEllipse(QRectF(cx - gr, cy - gr, gr * 2, gr * 2))
-        p.setBrush(Qt.BrushStyle.NoBrush)
+        def proj(q, scale):
+            w = np.maximum(_CAM_D - q[:, 2], 0.4)
+            k = (_CAM_D / w) * scale
+            return ox + q[:, 0] * k, oy - q[:, 1] * k
 
-        # Back halves of the rings first, so the sphere passes in front of them.
-        rings = []
-        for rad, tilt, yaw0, spd in self._rings:
-            M = R @ _rot(yaw0 + self._spin * spd, tilt)
-            q = (self._ring * rad) @ M.T
-            xs, ys = _project(q, cx, cy, r)
-            rings.append((q, xs, ys, spd))
-        self._paint_rings(p, rings, primary, accent, bg, back=True)
+        # ── sphere: displaced by the voice, bright at the limb ──────────────
+        wave = (np.sin(self._lat * 5.0 + t * 2.4) * np.cos(self._lon * 3.0 - t * 1.7)
+                + 0.6 * np.sin(self._lat * 9.0 - t * 3.1 + self._lon * 2.0))
+        rad = 1.0 + 0.012 * math.sin(t * 1.3) + (0.05 + 0.20 * g) * g * wave
+        q = (self._p0 * rad[:, None]) @ R.T
+        xs, ys = proj(q, rs)
+        nz = q[:, 2] / np.maximum(np.linalg.norm(q, axis=1), 1e-6)
+        limb = np.clip(1.0 - np.abs(nz), 0.0, 1.0) ** 2.2
+        flick = 0.85 + 0.15 * np.sin(t * 29.0 + self._jit * 50.0)
+        val = (np.where(nz > 0, 0.20, 0.07) + 0.95 * limb) * flick * (0.8 + 0.6 * g)
+        density = rs * rs / len(xs) * 5.0
+        buf.points(_PRI, xs, ys, val * density, radius=max(1.2, r / 220.0))
 
-        q = self._shape() @ R.T
-        xs, ys = _project(q, cx, cy, r)
-        depth = (q[:, 2] + 1.3) / 2.6                 # 0 back .. 1 front
+        # Latitude bands — the structure that makes it a globe, not a blob.
+        for lat in (-0.6, -0.3, 0.0, 0.3, 0.6):
+            ring = self._circle * np.array([math.cos(math.asin(lat)), 0, math.cos(math.asin(lat))]) \
+                + np.array([0.0, lat, 0.0])
+            qq = ring @ R.T
+            bx, by = proj(qq, rs * (1.0 + 0.04 * g))
+            front = 0.5 * (qq[:-1, 2] + qq[1:, 2]) > 0
+            v = np.where(front, 0.28, 0.07)
+            buf.lines(_PRI, bx[:-1], by[:-1], bx[1:], by[1:], v)
 
-        # Wiring.
-        ea = 0.5 * (depth[self._e0] + depth[self._e1])
-        ea = (0.10 + 0.55 * ea ** 1.6) * (0.75 + 0.6 * g)
-        b = np.clip((ea * _BUCKETS).astype(np.int32), 0, _BUCKETS - 1)
-        quad = np.stack([xs[self._e0], ys[self._e0], xs[self._e1], ys[self._e1]], 1)
-        for k in range(_BUCKETS):
-            sel = quad[b == k]
-            if len(sel):
-                p.setPen(QPen(_blend(bg, primary, (k + 0.5) / _BUCKETS * 0.75), 1.0))
-                p.drawLines([QLineF(*row) for row in sel.tolist()])
+        # ── hot core ───────────────────────────────────────────────────────
+        buf.disc(_ACC, ox, oy, rs * 0.95, 0.12 + 0.30 * g, 2.6)
+        buf.disc(_ACC, ox, oy, rs * 0.24, 0.55 + 0.70 * g, 1.8)
 
-        # Points: brighter and larger toward the viewer; the accent lights the
-        # front cap when there is a voice.
-        pb = np.clip((depth * _BUCKETS).astype(np.int32), 0, _BUCKETS - 1)
-        for k in range(_BUCKETS):
-            sel = np.flatnonzero(pb == k)
-            if not len(sel):
-                continue
-            f = (k + 0.5) / _BUCKETS
-            col = accent if (k == _BUCKETS - 1 and g > 0.08) else primary
-            p.setPen(QPen(_blend(bg, col, 0.30 + 0.70 * f), 1.2 + 2.2 * f * (0.8 + g),
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawPoints(QPolygonF([QPointF(float(xs[i]), float(ys[i])) for i in sel]))
+        # ── orbits with comets ─────────────────────────────────────────────
+        for k, (rr, tilt, yaw0, spd) in enumerate(self._rings):
+            M = R @ _rot(yaw0 + self._spin * spd * 0.6, tilt)
+            qq = (self._circle * rr) @ M.T
+            bx, by = proj(qq, rs)
+            z = 0.5 * (qq[:-1, 2] + qq[1:, 2])
+            buf.lines(_PRI, bx[:-1], by[:-1], bx[1:], by[1:], np.where(z > 0, 0.40, 0.12))
+            n = len(bx)
+            head = int((t * 22.0 * spd) % n) if spd > 0 else int((-t * 22.0 * -spd) % n)
+            tail = (head - np.arange(26) * (1 if spd > 0 else -1)) % n
+            fall = np.linspace(1.0, 0.0, 26) ** 1.6
+            buf.points(_ACC, bx[tail], by[tail], fall * 2.2, radius=1.6)
+            buf.disc(_ACC, float(bx[head]), float(by[head]), 5.0, 1.6, 1.5)
 
-        self._paint_rings(p, rings, primary, accent, bg, back=False)
+        # ── the voice: a spectrum ring in the screen plane ─────────────────
+        m = 120
+        a = np.linspace(0, 2 * np.pi, m, endpoint=False)
+        shape = (0.55 + 0.45 * np.sin(a * 3.0 + t * 1.9) * np.sin(a * 5.0 - t * 2.7))
+        live = g if not self._muted else 0.0
+        h = r * (0.012 + 0.16 * live * np.abs(shape) + 0.006 * np.sin(a * 9 + t * 4))
+        r0 = rs * 1.12
+        buf.lines(_ACC if live > 0.05 else _PRI,
+                  ox + np.cos(a) * r0, oy + np.sin(a) * r0,
+                  ox + np.cos(a) * (r0 + h), oy + np.sin(a) * (r0 + h),
+                  0.35 + 0.9 * live, width=1.4)
 
-    def _paint_rings(self, p, rings, primary, accent, bg, back: bool) -> None:
-        for q, xs, ys, spd in rings:
-            z = q[:, 2]
-            n = len(z)
-            lines = []
-            for i in range(n):
-                j = (i + 1) % n
-                if (z[i] + z[j] < 0) == back:
-                    lines.append(QLineF(float(xs[i]), float(ys[i]),
-                                        float(xs[j]), float(ys[j])))
-            p.setPen(QPen(_blend(bg, primary, 0.22 if back else 0.55), 1.1))
-            if lines:
-                p.drawLines(lines)
-            # A marker running along the ring, at the ring's own speed.
-            m = int((self._t * 18.0 * abs(spd) * (1 if spd > 0 else -1)) % n)
-            if (z[m] < 0) == back:
-                p.setPen(QPen(_blend(bg, accent, 0.45 if back else 1.0), 5.0,
-                              Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.drawPoint(QPointF(float(xs[m]), float(ys[m])))
+        # ── frame: a thin dial that turns slowly ───────────────────────────
+        a = np.linspace(0, 2 * np.pi, 361)
+        rf = r * 0.93
+        buf.polyline(_PRI, ox + np.cos(a) * rf, oy + np.sin(a) * rf, 0.16)
+        ticks = np.arange(72) * (2 * np.pi / 72) + self._spin * 0.15
+        ln = np.where(np.arange(72) % 6 == 0, 0.035, 0.015) * r
+        buf.lines(_PRI, ox + np.cos(ticks) * rf, oy + np.sin(ticks) * rf,
+                  ox + np.cos(ticks) * (rf - ln), oy + np.sin(ticks) * (rf - ln), 0.30)
+
+        # ── motes drifting around the orb ──────────────────────────────────
+        mo = self._motes
+        ang = mo[:, 0] * 2 * np.pi + t * (0.15 + 0.35 * mo[:, 1]) * (1 + g)
+        dist = rs * (1.25 + 1.0 * mo[:, 2])
+        buf.points(_PRI, ox + np.cos(ang) * dist, oy + np.sin(ang) * dist * 0.92,
+                   0.6 * (0.4 + 0.6 * np.sin(t * 2 + mo[:, 3] * 6) ** 2), radius=1.3)
+
+        self._finish(p, x0, y0, primary, accent, sc, exposure=0.85, bloom=0.45)
 
 
 class HoloProjector(_Base):
     """A holographic projector rendering the voice as a rising sculpture."""
 
-    _RINGS = 34          # history depth: one ring per sample
-    _SEGS = 56           # points around each ring
-    _MERIDIANS = 14      # vertical wires tying the rings into a surface
+    _RINGS = 36          # history depth: one ring per sample
+    _SEGS = 72           # points around each ring
+    _MERIDIANS = 18      # vertical wires tying the rings into a surface
     _HOP = 0.055         # seconds between history samples
 
     def __init__(self) -> None:
@@ -238,15 +217,14 @@ class HoloProjector(_Base):
         self._acc = 0.0
         self._peak = 0.0
         a = np.linspace(0.0, 2 * np.pi, self._SEGS, endpoint=False, dtype=np.float32)
-        self._ca, self._sa = np.cos(a), np.sin(a)
-        self._a = a
+        self._ca, self._sa, self._a = np.cos(a), np.sin(a), a
         rng = np.random.default_rng(11)
-        self._motes = rng.random((48, 3)).astype(np.float32)   # x, phase, speed
+        self._motes = rng.random((140, 3)).astype(np.float32)
+        self._beam = rng.random((70, 2)).astype(np.float32)
 
     def _advance(self, dt: float, amp: float) -> None:
-        # Sample the level at a fixed rate, so the sculpture's height is a
-        # fixed span of time regardless of the paint rate. The peak within each
-        # hop is kept, so a short syllable is never sampled away.
+        # Sample at a fixed rate so the sculpture's height is a fixed span of
+        # time at any paint rate; keep the peak so no syllable is missed.
         self._peak = max(self._peak, amp)
         self._acc += dt
         while self._acc >= self._HOP:
@@ -257,114 +235,83 @@ class HoloProjector(_Base):
     def paint(self, p: QPainter, cx: float, cy: float, r: float,
               primary: QColor, accent: QColor, bg: QColor | None = None,
               W: float = 0.0, H: float = 0.0) -> None:
-        bg = bg or QColor(0, 0, 0)
-        g = self._glow
-        t = self._t
-        pitch = 0.42
-        R = _rot(self._spin * 0.9, pitch)
+        t, g = self._t, self._glow
+        x0, y0 = cx - r, cy - r
+        buf = self._buf
+        sc = budget_scale(buf, r, cap=200.0)
+        r = r * sc
+        bw, bh = int(2.0 * r), int(2.05 * r)
+        buf.begin(bw, bh)
+        ox = r
+        base_y = r * 1.42                       # emitter centre inside the buffer
+        col_h = r * 1.12
+        rad0 = r * 0.50
 
-        base_y = cy + r * 0.86                 # the emitter's centre on screen
-        col_h = r * 1.55                       # how tall the sculpture stands
-        rad0 = r * 0.62
+        # ── beam: faint rays from the emitter, widening upward ─────────────
+        top_y = base_y - col_h * 1.08
+        bx0 = (self._beam[:, 0] * 2 - 1) * rad0 * 0.52
+        bx1 = bx0 * 2.3
+        flick = 0.5 + 0.5 * np.sin(t * (2 + 3 * self._beam[:, 1]) + self._beam[:, 1] * 9)
+        # Each ray in segments that fade with height — a beam that dissolves
+        # into the air, not one cut off by the edge of its buffer.
+        for s in range(8):
+            f0, f1 = s / 8.0, (s + 1) / 8.0
+            buf.lines(_PRI, ox + bx0 + (bx1 - bx0) * f0, np.full_like(bx0, base_y + (top_y - base_y) * f0),
+                      ox + bx0 + (bx1 - bx0) * f1, np.full_like(bx0, base_y + (top_y - base_y) * f1),
+                      (0.035 + 0.05 * g) * flick * (1.0 - f0) ** 1.5, width=2.5)
+        buf.disc(_PRI, ox, base_y - col_h * 0.45, rad0 * 1.3, 0.10 + 0.10 * g, 2.0, squash=1.4)
 
-        # ── beam ───────────────────────────────────────────────────────────
-        top_y = base_y - col_h * 1.05
-        beam = QPolygonF([QPointF(cx - rad0 * 0.55, base_y),
-                          QPointF(cx + rad0 * 0.55, base_y),
-                          QPointF(cx + rad0 * 1.25, top_y),
-                          QPointF(cx - rad0 * 1.25, top_y)])
-        lg = QLinearGradient(cx, base_y, cx, top_y)
-        lg.setColorAt(0.0, _c(primary, 70 + 70 * g))
-        lg.setColorAt(0.6, _c(primary, 22 + 25 * g))
-        lg.setColorAt(1.0, _c(primary, 0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(lg))
-        p.drawPolygon(beam)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-
-        # Motes drifting up the beam — quicker when the voice is up.
-        pts = []
-        for x0, ph, sp in self._motes:
-            f = (ph + t * (0.10 + 0.25 * sp) * (1.0 + 1.5 * g)) % 1.0
-            half = rad0 * (0.55 + 0.70 * f)
-            pts.append(QPointF(cx + (x0 * 2.0 - 1.0) * half, base_y - f * col_h * 1.05))
-        p.setPen(QPen(_blend(bg, accent, 0.55 + 0.4 * g), 2.0,
-                      Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawPoints(QPolygonF(pts))
+        mo = self._motes
+        f = (mo[:, 1] + t * (0.08 + 0.22 * mo[:, 2]) * (1.0 + 1.5 * g)) % 1.0
+        half = rad0 * (0.5 + 0.75 * f)
+        buf.points(_ACC, ox + (mo[:, 0] * 2 - 1) * half, base_y - f * col_h * 1.05,
+                   (1.0 - f) * (0.8 + 0.8 * g), radius=1.4)
 
         # ── voice sculpture ─────────────────────────────────────────────────
         hist = np.fromiter(self._hist, dtype=np.float32, count=self._RINGS)
         n, m = self._RINGS, self._SEGS
-        hk = np.linspace(0.0, 1.0, n, dtype=np.float32)            # 0 newest .. 1 oldest
-        # Radius: a calm vase when silent, swelling with each moment's level,
-        # with a few lobes turning around it so loud moments read as shaped.
+        hk = np.linspace(0.0, 1.0, n, dtype=np.float32)              # 0 newest .. 1 oldest
         lobes = 1.0 + (0.10 + 0.25 * hist[:, None]) * hist[:, None] * np.sin(
             self._a[None, :] * 5.0 + t * 2.6 + hk[:, None] * 4.0)
-        base = 0.42 + 0.10 * np.sin(hk * np.pi) + 0.95 * hist
-        rad = (base[:, None] * lobes)                                # (n, m)
-        X = rad * self._ca[None, :]
-        Z = rad * self._sa[None, :]
-        Y = np.repeat((hk * 2.0 - 1.0)[:, None], m, axis=1)          # -1 .. +1
+        base = 0.40 + 0.10 * np.sin(hk * np.pi) + 0.95 * hist
+        rad = base[:, None] * lobes
+        X, Z = rad * self._ca[None, :], rad * self._sa[None, :]
+        Y = np.repeat((hk * 2.0 - 1.0)[:, None], m, axis=1)
+        R = _rot(self._spin * 0.9, 0.40)
         q = np.stack([X, Y, Z], axis=2).reshape(-1, 3) @ R.T
-        # Screen: the column stands on the emitter, not about the centre.
-        scale = col_h / 2.0
         w = np.maximum(_CAM_D - q[:, 2] / 1.6, 0.4)
-        k = (_CAM_D / w)
-        xs = (cx + q[:, 0] * k * rad0 * 0.95).reshape(n, m)
-        ys = (base_y - col_h * 0.08 - (q[:, 1] + 1.0) * scale * k).reshape(n, m)
+        k = _CAM_D / w
+        xs = (ox + q[:, 0] * k * rad0 * 0.95).reshape(n, m)
+        ys = (base_y - col_h * 0.08 - (q[:, 1] + 1.0) * (col_h / 2.0) * k).reshape(n, m)
         zz = q[:, 2].reshape(n, m)
 
-        fade = (1.0 - hk) ** 1.2                                     # old rings fade
-        lines_by_b: list[list[QLineF]] = [[] for _ in range(_BUCKETS)]
-        acc_lines: list[QLineF] = []
-        for i in range(n):
-            front = zz[i] > -0.05
-            for j in range(m):
-                jj = (j + 1) % m
-                a = fade[i] * (0.30 + 0.70 * (front[j] and front[jj]))
-                if a < 0.05:
-                    continue
-                ln = QLineF(float(xs[i, j]), float(ys[i, j]),
-                            float(xs[i, jj]), float(ys[i, jj]))
-                if i < 3 and hist[i] > 0.06:
-                    acc_lines.append(ln)                              # the "now" rings
-                else:
-                    lines_by_b[min(_BUCKETS - 1, int(a * _BUCKETS))].append(ln)
-        step = m // self._MERIDIANS
-        for j in range(0, m, step):
-            for i in range(n - 1):
-                a = fade[i] * (0.45 if zz[i, j] > 0 else 0.15)
-                if a < 0.05:
-                    continue
-                lines_by_b[min(_BUCKETS - 1, int(a * _BUCKETS))].append(
-                    QLineF(float(xs[i, j]), float(ys[i, j]),
-                           float(xs[i + 1, j]), float(ys[i + 1, j])))
-        for b, seg in enumerate(lines_by_b):
-            if seg:
-                p.setPen(QPen(_blend(bg, primary, (b + 0.6) / _BUCKETS), 1.0))
-                p.drawLines(seg)
-        if acc_lines:
-            p.setPen(QPen(_blend(bg, accent, 0.95), 1.6))
-            p.drawLines(acc_lines)
+        fade = (1.0 - hk) ** 1.15
+        nxt = np.roll(np.arange(m), -1)
+        front = (zz + zz[:, nxt]) > 0
+        val = fade[:, None] * np.where(front, 0.55, 0.14)
+        cur = (np.arange(n) < 3)[:, None] & (hist[:, None] > 0.06)
+        for layer, mask in ((_PRI, ~cur), (_ACC, np.broadcast_to(cur, val.shape))):
+            sel = mask & (val > 0.02)
+            if sel.any():
+                ii, jj = np.nonzero(sel)
+                buf.lines(layer, xs[ii, jj], ys[ii, jj], xs[ii, nxt[jj]], ys[ii, nxt[jj]],
+                          val[ii, jj] * (1.5 if layer == _ACC else 1.0))
+        js = np.arange(0, m, m // self._MERIDIANS)
+        ii = np.repeat(np.arange(n - 1), len(js))
+        jj = np.tile(js, n - 1)
+        mv = fade[ii] * np.where(zz[ii, jj] > 0, 0.30, 0.08)
+        buf.lines(_PRI, xs[ii, jj], ys[ii, jj], xs[ii + 1, jj], ys[ii + 1, jj], mv)
 
-        # ── emitter ─────────────────────────────────────────────────────────
-        ew, eh = rad0 * 1.25, rad0 * 0.30
-        for k2, (sc, a, wd) in enumerate(((1.00, 0.70, 1.6), (0.78, 0.45, 1.1),
-                                          (0.52, 0.85, 2.0))):
-            rw, rh = ew * sc, eh * sc
-            box = QRectF(cx - rw, base_y - rh, rw * 2, rh * 2)
-            p.setPen(QPen(_blend(bg, accent if k2 == 2 else primary,
-                                 a * (0.75 + 0.35 * g)), wd))
-            p.drawEllipse(box)
-            # Dashes turning on the outer rings, opposite ways.
-            if k2 < 2:
-                p.setPen(QPen(_blend(bg, primary, 0.9), 2.2))
-                base_a = (self._spin * (90 if k2 == 0 else -140)) % 360
-                for s in range(4):
-                    p.drawArc(box, int((base_a + s * 90) * 16), int(26 * 16))
-        core = QRadialGradient(cx, base_y, ew * 0.55)
-        core.setColorAt(0.0, _c(accent, 200 + 55 * g))
-        core.setColorAt(1.0, _c(accent, 0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(core))
-        p.drawEllipse(QRectF(cx - ew * 0.55, base_y - eh * 0.55, ew * 1.1, eh * 1.1))
+        # ── emitter ────────────────────────────────────────────────────────
+        a = np.linspace(0, 2 * np.pi, 200, endpoint=False)
+        ew, eh = rad0 * 1.30, rad0 * 0.28
+        for sc, v, layer in ((1.00, 0.75, _PRI), (0.80, 0.40, _PRI), (0.55, 0.9, _ACC)):
+            buf.polyline(layer, ox + np.cos(a) * ew * sc, base_y + np.sin(a) * eh * sc,
+                         v * (0.8 + 0.4 * g), closed=True)
+        for s, (sc, spd) in enumerate(((1.0, 0.9), (0.80, -1.4))):
+            for d in range(4):
+                aa = np.linspace(0, 0.45, 18) + self._spin * spd + d * np.pi / 2
+                buf.polyline(_PRI, ox + np.cos(aa) * ew * sc, base_y + np.sin(aa) * eh * sc, 1.1)
+        buf.disc(_ACC, ox, base_y, ew * 0.50, 0.35 + 0.45 * g, 2.2, squash=eh / ew)
+
+        self._finish(p, x0, y0, primary, accent, sc, exposure=0.85, bloom=0.45)

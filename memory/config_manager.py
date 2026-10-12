@@ -282,34 +282,46 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
 
 
 # Every centrepiece the HUD can draw, in picker order, with its display label.
-# "face" and "core" are the originals; the rest are rendered by the same
-# software painter (core/avatar.py variants and core/holo_viz.py), so switching
-# costs no reload and no GPU.
+# The holographic styles render through core/holo_engine (GPU when available);
+# "core" is the original reactor. Any OBJ/GLB in assets/avatars/ is added at
+# runtime as "model:<name>" — see hud_styles().
 HUD_STYLE_INFO: dict[str, str] = {
-    "face":    "NATIVE FACE",
-    "female":  "FEMALE FACE",
-    "wakanda": "PANTHER",
-    "orb":     "HOLO ORB",
-    "holo":    "HOLO PROJECTOR",
+    "face":    "HOLO FACE",
+    "orb":     "ENERGY ORB",
+    "holo":    "PROJECTOR",
     "core":    "REACTOR CORE",
 }
 HUD_STYLES = tuple(HUD_STYLE_INFO)
 
 
-def get_hud_style() -> str:
-    """Which centrepiece the HUD draws — one of HUD_STYLES.
+def hud_styles() -> dict[str, str]:
+    """Built-in styles plus every model dropped into assets/avatars/."""
+    out = dict(HUD_STYLE_INFO)
+    try:
+        from core.mesh_import import discover
+        for key in discover():
+            out[key] = key.split(":", 1)[1].replace("_", " ").upper()
+    except Exception:
+        pass
+    return out
 
-    Taste, not capability — all of them render in the same software painter and
-    cost about the same. Defaults to the head because that is what MARK LIV
-    shipped with; the choice survives a restart.
+
+def get_hud_style() -> str:
+    """Which centrepiece the HUD draws — a key of hud_styles().
+
+    Taste, not capability — all of them cost about the same. Defaults to the
+    face; an unknown value (a style that was removed, a model file that was
+    deleted) falls back to it rather than to an empty HUD.
     """
-    v = str(load_api_keys().get("hud_style", "face")).strip().lower()
-    return v if v in HUD_STYLES else "face"
+    v = str(load_api_keys().get("hud_style", "face")).strip()
+    if v in HUD_STYLES:
+        return v
+    return v if v.startswith("model:") and v in hud_styles() else "face"
 
 
 def save_hud_style(style: str) -> None:
-    s = str(style or "").strip().lower()
-    _save_flag("hud_style", s if s in HUD_STYLES else "face")
+    s = str(style or "").strip()
+    _save_flag("hud_style", s if s in hud_styles() else "face")
 
 
 # ── Live-session tuning ──────────────────────────────────────────────────────

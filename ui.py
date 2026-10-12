@@ -58,9 +58,10 @@ from PyQt6.QtWidgets import (
 
 try:
     from core.holo_viz import HoloOrb, HoloProjector
-except Exception as _e:            # noqa: BLE001 - one style lost, never fatal
-    HoloOrb = HoloProjector = None
-    print(f"[HUD] holographic visualisers unavailable ({_e}).")
+    from core.holo_head import HoloHead
+except Exception as _e:            # noqa: BLE001 - styles lost, never fatal
+    HoloOrb = HoloProjector = HoloHead = None
+    print(f"[HUD] holographic renderers unavailable ({_e}).")
 
 try:
     from core.avatar import HoloAvatar
@@ -420,20 +421,16 @@ class HudCanvas(QWidget):
         self.state    = "INITIALISING"
         self._assistant_name = assistant_name
 
-        # The holographic head that fills the HUD. If it could not be imported
-        # we fall back to the old glowing core so the panel is never empty.
+        # The holographic head that fills the HUD — built lazily in _renderer()
+        # like every other style; "face" falls back to the flat-shaded head and
+        # then to the reactor core, so the panel is never empty.
         self._avatar = None
-        if HoloAvatar is not None:
-            try:
-                self._avatar = HoloAvatar()
-            except Exception:
-                self._avatar = None
 
         # Which centrepiece to draw. Read once here and changed live by the
         # settings (set_style). Every renderer is built the first time it is
         # shown and then kept, so switching back is instant and costs no reload.
         # "core" has no object: it is _paint_core below.
-        self._renderers: dict = {"face": self._avatar}
+        self._renderers: dict = {}
         try:
             from memory.config_manager import get_hud_style
             self.hud_style = get_hud_style()
@@ -483,8 +480,12 @@ class HudCanvas(QWidget):
             return self._renderers[style]
         r = None
         try:
-            if style in ("female", "wakanda") and HoloAvatar is not None:
-                r = HoloAvatar(style)
+            if style == "face":
+                r = HoloHead() if HoloHead is not None else None
+            elif style.startswith("model:") and HoloHead is not None:
+                from core.mesh_import import discover, load_avatar
+                path = discover().get(style)
+                r = HoloHead(mesh=load_avatar(path)) if path else None
             elif style == "orb" and HoloOrb is not None:
                 r = HoloOrb()
             elif style == "holo" and HoloProjector is not None:
@@ -492,6 +493,11 @@ class HudCanvas(QWidget):
         except Exception as e:
             print(f"[HUD] style '{style}' unavailable: {e}")
             r = None
+        if r is None and style == "face" and HoloAvatar is not None:
+            try:
+                r = HoloAvatar()          # the original flat-shaded head
+            except Exception:
+                r = None
         self._renderers[style] = r
         return r
 
@@ -916,8 +922,11 @@ class HudCanvas(QWidget):
                 else:
                     _acc = qcol(C.PRI)
             if HoloAvatar is not None and isinstance(rend, HoloAvatar):
-                _r_head = min(fw * 0.355, _band_h / (rend.SPAN + 0.08))
-                _head_cy = (_band_t + (_band_h - rend.SPAN * _r_head) / 2.0
+                # The holographic heads stand on a projector base, which needs
+                # room below the neck that the flat head never did.
+                _span = rend.SPAN + (0.42 if getattr(rend, "HAS_BASE", False) else 0.08)
+                _r_head = min(fw * 0.355, _band_h / _span)
+                _head_cy = (_band_t + (_band_h - _span * _r_head) / 2.0
                             + rend.TOP * _r_head)
                 rend.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
             else:
@@ -1719,7 +1728,7 @@ class CustomizeOverlay(QWidget):
         # ── HUD centrepiece ──────────────────────────────────────────────────
         # Previewed live on the HUD behind the overlay, like the colour; CANCEL
         # puts the original back, APPLY keeps it.
-        from memory.config_manager import HUD_STYLE_INFO, get_hud_style
+        from memory.config_manager import get_hud_style, hud_styles
         lay.addSpacing(4)
         lay.addWidget(_lbl("HUD STYLE  —  previews live", 8, color=C.TEXT_DIM,
                             align=Qt.AlignmentFlag.AlignLeft))
@@ -1728,7 +1737,7 @@ class CustomizeOverlay(QWidget):
         self._sel_hud = self._initial_hud
         self._hud_btns: dict[str, QPushButton] = {}
         grid = QGridLayout(); grid.setSpacing(4)
-        for i, (_k, _label) in enumerate(HUD_STYLE_INFO.items()):
+        for i, (_k, _label) in enumerate(hud_styles().items()):
             b = QPushButton(_label)
             b.setCheckable(True)
             b.setFixedHeight(28)
@@ -5572,7 +5581,7 @@ class MainWindow(QMainWindow):
 
 
     def _refresh_hud_btn(self):
-        from memory.config_manager import HUD_STYLE_INFO, get_hud_style
+        from memory.config_manager import get_hud_style, hud_styles
         cur = get_hud_style()
         # No state is "off", so all read as active — this is a choice between
         # looks, not a switch with a disabled side.
@@ -5581,7 +5590,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText(f"◉  HUD: {HUD_STYLE_INFO.get(cur, cur.upper())}")
+        self._hud_btn.setText(f"◉  HUD: {hud_styles().get(cur, cur.upper())}")
         self._hud_btn.setStyleSheet(style)
         self._hud_btn.setToolTip(
             "Tap to cycle through the HUD styles. ⚙ → CUSTOMISE shows them all "
@@ -5590,7 +5599,7 @@ class MainWindow(QMainWindow):
     def _set_hud_style(self, style: str) -> None:
         """Persist and show a centrepiece. Every renderer stays in memory once
         built, so switching is instant and switching back costs nothing."""
-        from memory.config_manager import HUD_STYLE_INFO, get_hud_style, save_hud_style
+        from memory.config_manager import get_hud_style, hud_styles, save_hud_style
         changed = style != get_hud_style()
         save_hud_style(style)
         try:
@@ -5600,7 +5609,7 @@ class MainWindow(QMainWindow):
         self._refresh_hud_btn()
         if changed:
             self._log.append_log(
-                f"SYS: HUD style — {HUD_STYLE_INFO.get(style, style).title()}.")
+                f"SYS: HUD style — {hud_styles().get(style, style).title()}.")
 
     def refresh_vision_btn(self, on: bool) -> None:
         """Paint the live-vision button. Called by the assistant as well, since
@@ -5638,10 +5647,11 @@ class MainWindow(QMainWindow):
 
     def _toggle_hud_style(self):
         """Drawer button: step to the next style in picker order."""
-        from memory.config_manager import HUD_STYLES, get_hud_style
+        from memory.config_manager import get_hud_style, hud_styles
+        order = list(hud_styles())
         cur = get_hud_style()
-        i = HUD_STYLES.index(cur) if cur in HUD_STYLES else -1
-        self._set_hud_style(HUD_STYLES[(i + 1) % len(HUD_STYLES)])
+        i = order.index(cur) if cur in order else -1
+        self._set_hud_style(order[(i + 1) % len(order)])
 
     def _toggle_ptt(self):
         from memory.config_manager import (get_push_to_talk_enabled,

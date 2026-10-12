@@ -19,15 +19,6 @@ What is still generated here, around that face:
   * vertex normals, jaw-rig weights, a thinned wireframe, and the landmark
     index rings (eyes, brows, lips) the renderer animates.
 
-Variants (`get_head_mesh(variant)`) reshape the same measured face rather than
-loading another model, so every one of them keeps the landmark rings, the rigs
-and the lip-sync for free:
-  * "base"    — the original head;
-  * "female"  — softer jaw and chin, finer nose, fuller lips, larger eyes, a
-                slimmer neck, plus long hair as strands (`hair`);
-  * "wakanda" — a panther-mask head: pointed ears built into the surface, and
-                the anchor points for the mask's pattern and claw necklace.
-
 Coordinate system after normalisation (head-local, right-handed):
     +x → viewer's right      +y → up      +z → out of the face
     y = +1.0 crown,  y = -1.0 chin,  eyes land on y ≈ 0.
@@ -269,31 +260,22 @@ def _check_landmarks(verts: np.ndarray) -> None:
     assert abs(lips[0]) < 0.5, "lips are not centred"
 
 
-def build_head(variant: str = "base") -> dict:
-    """Assemble the full head. Called once per variant; `get_head_mesh()`
-    caches the result."""
+def build_head() -> dict:
+    """Assemble the full head. Called once; `get_head_mesh()` caches the result."""
     verts, faces = _load_obj(_OBJ)
     _check_landmarks(verts)
 
     n_face = len(verts)
     verts, faces = _add_cranium(verts, faces)
-    n_skull = len(verts)
-    if variant == "wakanda":
-        verts, faces = _add_ears(verts, faces, n_skull)
     n_head = len(verts)
     verts, faces, fade = _add_neck(verts, faces)
 
     # ── normalise: crown → +1, chin → -1, eyes land on y ≈ 0 ────────────────
-    # Measured on the skull alone: the panther's ears stand above the crown and
-    # must not shrink the face to make room for themselves.
-    head_y = verts[:n_skull, 1]
+    head_y = verts[:n_head, 1]
     crown, chin = head_y.max(), head_y.min()
     scale = 2.0 / (crown - chin)
     centre = np.array([0.0, (crown + chin) * 0.5, 0.0])
     verts = (verts - centre) * scale
-
-    if variant == "female":
-        verts = _morph_female(verts, n_face, n_head)
 
     # Outward reference, per part: the head is star-shaped about its own centre,
     # while the neck is a tube whose outward direction is radial in x/z only.
@@ -340,16 +322,7 @@ def build_head(variant: str = "base") -> dict:
     # always behind the head where they overlap, so draw every neck facet first.
     face_group = (faces >= n_head).all(axis=1).astype(np.int32)   # 1 = neck
 
-    extra: dict = {}
-    if variant == "female":
-        extra["hair"] = _hair_strands()
-    elif variant == "wakanda":
-        extra["pattern"] = _mask_pattern(verts, normals, n_head)
-        extra["necklace"] = _necklace(verts[n_head:])
-
     return {
-        **extra,
-        "variant": variant,
         "face_group": np.ascontiguousarray(1 - face_group, dtype=np.float32),
         "brow": np.ascontiguousarray(brow, dtype=np.float32),
         "lips": np.ascontiguousarray(lips, dtype=np.float32),
@@ -363,230 +336,16 @@ def build_head(variant: str = "base") -> dict:
         "landmarks": {k: np.array(v, dtype=np.int32) for k, v in LANDMARKS.items()},
         "n_face": n_face,
         "n_head": n_head,
-        # Top of the silhouette (crown, or ear tips) and bottom of the neck.
-        "span": (max(1.0, float(verts[:n_head, 1].max())), float(verts[:, 1].min())),
+        "span": (1.0, float(verts[:, 1].min())),        # crown, bottom of the neck
     }
 
 
-_CACHE: dict[str, dict] = {}
+_CACHE: dict | None = None
 
 
-def get_head_mesh(variant: str = "base") -> dict:
-    """Process-wide cached mesh per variant — every HudCanvas shares the arrays."""
-    if variant not in _CACHE:
-        _CACHE[variant] = build_head(variant)
-    return _CACHE[variant]
-
-
-# ── variants ──────────────────────────────────────────────────────────────────
-# All of these work in the normalised frame (crown +1, chin -1, eyes at y≈0),
-# so the numbers below are fractions of the head's half-height and survive any
-# change to the canonical model's units.
-
-def _smooth(x):
-    x = np.clip(x, 0.0, 1.0)
-    return x * x * (3.0 - 2.0 * x)
-
-
-def _morph_female(v: np.ndarray, n_face: int, n_head: int) -> np.ndarray:
-    """Reshape the measured head towards typically feminine proportions.
-
-    Every change is a smooth, local displacement weighted by distance from a
-    landmark, so the topology — and therefore the eye, brow and lip rings the
-    renderer animates — is untouched. Measured head: jaw ±0.60 at y=-0.6,
-    nose tip (0, -0.20, 0.68), lips centred at y=-0.545.
-    """
-    v = v.copy()
-    head = slice(0, n_head)
-    x, y, z = v[head, 0], v[head, 1], v[head, 2]
-
-    # Slightly narrower face overall, and a jaw that tapers more to the chin.
-    taper = 1.0 - 0.13 * _smooth((-0.25 - y) / 0.75)
-    v[head, 0] = x * 0.965 * taper
-    # A smaller, less projected chin.
-    chin = np.exp(-((y + 0.95) / 0.16) ** 2) * np.exp(-(x / 0.30) ** 2)
-    v[head, 2] = z - 0.045 * chin * (z > 0)
-    v[head, 1] = y + 0.035 * chin
-
-    # Softer brow ridge.
-    brow_y = v[LANDMARKS["brow_l"] + LANDMARKS["brow_r"], 1].mean()
-    ridge = (np.exp(-((v[head, 1] - brow_y - 0.03) / 0.10) ** 2)
-             * np.clip(v[head, 2] / 0.35, 0.0, 1.0))
-    v[head, 2] -= 0.030 * ridge
-
-    # A finer nose: pulled toward its own base and back into the face.
-    tip = v[4].copy()
-    base = tip + np.array([0.0, 0.10, -0.24])
-    w = np.exp(-(np.linalg.norm(v[head] - tip, axis=1) / 0.20) ** 2)[:, None]
-    v[head] = v[head] + (base - v[head]) * (0.16 * w)
-
-    # Fuller lips: taller and pushed forward a little.
-    lc = v[LANDMARKS["lips_out"]].mean(axis=0)
-    lw = (np.exp(-((v[head, 1] - lc[1]) / 0.10) ** 2)
-          * np.exp(-(v[head, 0] / 0.22) ** 2)
-          * np.clip(v[head, 2] / 0.35, 0.0, 1.0))
-    v[head, 1] = lc[1] + (v[head, 1] - lc[1]) * (1.0 + 0.22 * lw)
-    v[head, 2] += 0.028 * lw
-
-    # Larger eyes: scale each eye region about its own centre.
-    for key in ("eye_l", "eye_r"):
-        ec = v[LANDMARKS[key]].mean(axis=0)
-        d = np.linalg.norm(v[:n_face] - ec, axis=1)
-        k = 1.0 + 0.11 * np.exp(-(d / 0.13) ** 2)
-        v[:n_face] = ec + (v[:n_face] - ec) * k[:, None]
-
-    # A slimmer neck.
-    v[n_head:, 0] *= 0.84
-    v[n_head:, 2] = -0.25 + (v[n_head:, 2] + 0.25) * 0.86
-    return v
-
-
-# Hair shell: an ellipsoid fitted just outside the measured cranium (head is
-# ±0.66 wide at eye level, crown at +1.0, back of the skull at z≈-0.86).
-_HAIR_C = np.array([0.0, 0.04, -0.16])
-_HAIR_R = np.array([0.745, 1.04, 0.85])
-
-
-def _hair_strands(per_side: int = 64, pts: int = 22) -> dict:
-    """Long hair with a centre parting, as a bundle of 3-D strands.
-
-    Each strand starts on the parting, follows the skull over the side of the
-    head, then falls past the jaw to the shoulders with a gentle wave. Drawn as
-    lines it reads as a hologram of hair, which is what everything else in the
-    HUD is — a filled mass would read as a helmet.
-
-    Returns {"pts": (n, pts, 3) positions, "nrm": (n, pts, 3) outward normals,
-    "w": (n,) per-strand weight} in head-local coordinates.
-    """
-    rng = np.random.default_rng(7)          # fixed: the same hair every launch
-    strands, normals, weight = [], [], []
-    for side in (-1.0, 1.0):
-        # β runs along the parting, front hairline (+) to the nape (−), as the
-        # angle around the x axis measured from straight up.
-        for i in range(per_side):
-            beta = np.radians(np.interp(i, [0, per_side - 1], [52.0, -120.0])
-                              + rng.uniform(-2.0, 2.0))
-            a_end = np.radians(rng.uniform(34.0, 46.0))   # where it leaves the skull
-            n_sk = pts // 3
-            seg = []
-            # Over the skull: α (angle from the side pole) from the parting to α_end.
-            for a in np.linspace(np.radians(88.0), a_end, n_sk):
-                d = np.array([side * np.cos(a), np.sin(a) * np.cos(beta),
-                              np.sin(a) * np.sin(beta)])
-                seg.append(_HAIR_C + d * _HAIR_R)
-            p0 = seg[-1]
-            # The fall: down to the shoulders, flaring away from the face and
-            # swinging back a little the further it goes.
-            n_fall = pts - n_sk
-            y_end = -1.18 - 0.12 * rng.random() - (0.10 if np.sin(beta) < 0 else 0.0)
-            phase = rng.uniform(0, 2 * np.pi)
-            for k in range(1, n_fall + 1):
-                f = k / n_fall
-                y = p0[1] + (y_end - p0[1]) * f
-                flare = 0.16 * _smooth(f * 1.4) + 0.035 * np.sin(f * 7.0 + phase)
-                xx = p0[0] + side * flare
-                zz = p0[2] - 0.10 * f * (1.0 if np.sin(beta) > -0.3 else 0.4)
-                seg.append(np.array([xx, y, zz]))
-            seg = np.array(seg)
-            nrm = seg - _HAIR_C
-            nrm[n_sk:, 1] = 0.0                      # the fall faces outward
-            nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
-            strands.append(seg)
-            normals.append(nrm)
-            # Front strands frame the face and carry the look; back ones are
-            # mostly hidden and only need to be suggested.
-            weight.append(0.55 + 0.45 * _smooth((np.sin(beta) + 0.3) / 1.1))
-    return {"pts": np.array(strands, dtype=np.float32),
-            "nrm": np.array(normals, dtype=np.float32),
-            "w": np.array(weight, dtype=np.float32)}
-
-
-def _add_ears(verts: np.ndarray, faces: np.ndarray, n_skull: int):
-    """Two pointed ears on the crown, built into the surface so they are lit,
-    posed and depth-sorted exactly like the rest of the head.
-
-    Model units here (pre-normalisation): the cranium spans roughly y -9.4 to
-    +14, x ±8.4, so the ears sit high on the sides of the skull.
-    """
-    skull = verts[:n_skull]
-    top = skull[:, 1].max()
-    out_v = [verts]
-    out_f = list(faces)
-    base_i = len(verts)
-    for side in (-1.0, 1.0):
-        targets = [np.array([side * 6.6, top - 3.4, -0.2]),
-                   np.array([side * 3.4, top - 1.0, -1.6]),
-                   np.array([side * 6.0, top - 3.6, -5.2])]
-        idx = [int(np.argmin(np.linalg.norm(skull - tg, axis=1))) for tg in targets]
-        b = skull[idx]
-        c = b.mean(axis=0)
-        out_dir = c - np.array([0.0, 2.0, -1.0])
-        out_dir /= np.linalg.norm(out_dir)
-        tip = c + out_dir * 3.2 + np.array([side * 0.4, 2.0, 0.0])
-        out_v.append(tip[None])
-        ti = base_i
-        base_i += 1
-        a0, a1, a2 = idx
-        out_f += [[a0, a1, ti], [a1, a2, ti], [a2, a0, ti]]
-    return np.vstack(out_v), np.array(out_f, dtype=np.int64)
-
-
-def _surface_path(verts: np.ndarray, normals: np.ndarray, n_head: int,
-                  pts: list) -> np.ndarray:
-    """Vertex indices tracing a line across the front of the face through the
-    given (x, y) waypoints, snapped to the nearest front-facing vertex — so the
-    line moves with the jaw and the brows, as if printed on the skin."""
-    front = np.flatnonzero(normals[:n_head, 2] > 0.15)
-    out: list[int] = []
-    for (x0, y0), (x1, y1) in zip(pts[:-1], pts[1:]):
-        for s in np.linspace(0.0, 1.0, 9):
-            q = np.array([x0 + (x1 - x0) * s, y0 + (y1 - y0) * s])
-            d = np.linalg.norm(verts[front, :2] - q, axis=1)
-            i = int(front[np.argmin(d)])
-            if not out or out[-1] != i:
-                out.append(i)
-    return np.array(out, dtype=np.int32)
-
-
-def _mask_pattern(verts, normals, n_head) -> list:
-    """The mask's raised silver lines, as vertex paths: a centre line up the
-    forehead, arrow-shaped lines rising from the inner eyes, cheek lines from
-    the outer eyes down to the jaw, and the plate seam around the mouth."""
-    paths = [
-        [(0.0, 0.30), (0.0, 0.62)],                                   # centre
-        [(-0.13, 0.12), (-0.10, 0.36), (0.0, 0.52)],                  # inner V
-        [(0.13, 0.12), (0.10, 0.36), (0.0, 0.52)],
-        [(-0.50, 0.14), (-0.36, 0.34), (-0.12, 0.44)],                # brow arcs
-        [(0.50, 0.14), (0.36, 0.34), (0.12, 0.44)],
-        [(-0.44, -0.02), (-0.52, -0.40), (-0.34, -0.76)],             # cheeks
-        [(0.44, -0.02), (0.52, -0.40), (0.34, -0.76)],
-        [(-0.30, -0.42), (-0.12, -0.36), (0.0, -0.35)],               # mouth plate
-        [(0.30, -0.42), (0.12, -0.36), (0.0, -0.35)],
-        [(-0.30, -0.42), (-0.24, -0.78), (0.0, -0.94)],
-        [(0.30, -0.42), (0.24, -0.78), (0.0, -0.94)],
-    ]
-    return [_surface_path(verts, normals, n_head, pp) for pp in paths]
-
-
-def _necklace(neck: np.ndarray, n: int = 13) -> dict:
-    """A collar of claws around the base of the neck, front half only — the
-    back of it is never seen. Returns {"base": (n, 2, 3), "tip": (n, 3),
-    "nrm": (n, 3)} in head-local coordinates."""
-    y_ring = neck[:, 1].min() + 0.30
-    band = neck[np.abs(neck[:, 1] - y_ring) < 0.08]
-    cx, cz = band[:, 0].mean(), band[:, 2].mean()
-    rx = np.abs(band[:, 0] - cx).max() * 1.04
-    rz = np.abs(band[:, 2] - cz).max() * 1.04
-    base, tip, nrm = [], [], []
-    for a in np.radians(np.linspace(-78.0, 78.0, n)):
-        hw = np.radians(5.2)
-        pts = [np.array([cx + rx * np.sin(b), y_ring, cz + rz * np.cos(b)])
-               for b in (a - hw, a + hw)]
-        o = np.array([np.sin(a), 0.0, np.cos(a)])
-        mid = (pts[0] + pts[1]) / 2.0
-        base.append(pts)
-        tip.append(mid + np.array([0.0, -0.16, 0.0]) + o * 0.07)
-        nrm.append(o)
-    return {"base": np.array(base, dtype=np.float32),
-            "tip": np.array(tip, dtype=np.float32),
-            "nrm": np.array(nrm, dtype=np.float32)}
+def get_head_mesh() -> dict:
+    """Process-wide cached mesh — every HudCanvas shares the same arrays."""
+    global _CACHE
+    if _CACHE is None:
+        _CACHE = build_head()
+    return _CACHE
