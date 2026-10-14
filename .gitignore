@@ -61,3 +61,16 @@ graphify-out/
 
 # Voice-picker samples (regenerated on demand)
 config/voice_cache/
+
+# Imported 3D avatars, processed once per file (rebuilt on demand)
+config/avatar_cache/
+# Per-model hologram looks and user presets (⚙ SETUP → HOLOGRAMA)
+config/holo_looks.json
+# MediaPipe face model for avatar rigging (download link in requirements.txt)
+assets/models/*.task
+# Drop-in 3D heads (assets/avatars/). Personal and often third-party models —
+# large (hundreds of MB) and under licences that forbid redistribution, so
+# they stay on the machine. Only the instructions are versioned; the default
+# face (core/face_model.obj) ships with the project.
+assets/avatars/*
+!assets/avatars/README.md

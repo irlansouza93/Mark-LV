@@ -104,7 +104,15 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 #   pip install pandas       # file_processor: spreadsheet/CSV analysis
 #   pip install pydub        # file_processor: audio metadata and conversion
 #                            #   (also needs ffmpeg on PATH for most formats)
-#   pip install mediapipe    # pushup_counter: elbow-angle rep detection
+#   pip install mediapipe    # pushup_counter: elbow-angle rep detection;
+#                            #   HUD avatars: finds each imported head's lips and
+#                            #   eyelids (core/face_rig.py). Also needs the model:
+#                            #   assets/models/face_landmarker.task from
+#                            #   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+#                            #   NOTE: it pulls opencv-contrib-python, which
+#                            #   shares the cv2 folder with opencv-python —
+#                            #   uninstalling either one breaks cv2; reinstall
+#                            #   the one you keep with --force-reinstall.
 
 # ── Optional: local wake word ("Hey Jarvis") ──────────────────────────────────
 # Deliberately NOT installed by default — it's opt-in. Enable it (and download

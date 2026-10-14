@@ -120,6 +120,14 @@ class HoloBuffer:
         self._val[layer].append(np.concatenate([val * gx * gy, val * fx * gy,
                                                 val * gx * fy, val * fx * fy]))
 
+    supports_mesh = False          # surfaces need the GPU (core.holo_surface)
+
+    def points_rgb(self, xs, ys, rgb, val, radius: float = 1.0, layer: int = 2) -> None:
+        """Texture-coloured points. Layers here are scalar light, so the colour
+        is kept as brightness only, in `layer`'s theme colour."""
+        lum = np.asarray(rgb, np.float32) @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+        self.points(layer, xs, ys, np.asarray(val, np.float32) * lum * 1.6)
+
     def lines(self, layer: int, x0, y0, x1, y1, val, spacing: float = 0.8,
               width: float = 1.0) -> None:
         """Additive anti-aliased segments, rasterised as dense point runs.
@@ -167,9 +175,10 @@ class HoloBuffer:
     # ── finishing ───────────────────────────────────────────────────────────
     def compose(self, colors: list[QColor], t: float, exposure: float = 1.0,
                 bloom: float = 0.9, scan: float = 0.18, aberration: int = 1,
-                glitch: float = 0.0) -> QImage:
+                glitch: float = 0.0, tonemap: int = 0) -> QImage:
         """Bloom, colour, scanlines and tone-map the layers into an RGB image.
-        `colors` has one entry per layer."""
+        `colors` has one entry per layer. (`tonemap` is the GPU backend's: the
+        realistic mode needs surfaces, which only the GPU draws.)"""
         self._resolve()
         L = self.buf
         for i in self.soft:
@@ -246,10 +255,59 @@ def draw_additive(p: QPainter, img: QImage, x: float, y: float,
     p.setCompositionMode(mode)
 
 
+def draw_over(p: QPainter, img: QImage, x: float, y: float, scale: float = 1.0) -> None:
+    """Blend a composed buffer as an opaque picture (premultiplied alpha): the
+    realistic mode, where a lit face should hide the HUD grid behind it
+    instead of adding light to it."""
+    mode = p.compositionMode()
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, scale < 1.0)
+    p.drawImage(QRectF(x, y, img.width() / scale, img.height() / scale), img)
+    p.setCompositionMode(mode)
+
+
 def budget_scale(buffer, r: float, cap: float = 170.0) -> float:
     """Resolution scale for a renderer: 1 on the GPU, capped in software so a
     full-screen hologram costs what a 170 px one does."""
     return 1.0 if type(buffer).__name__ == "GpuBuffer" else min(1.0, cap / max(1.0, r))
+
+
+class DepthGrid:
+    """A coarse z-buffer built from the points themselves, so a hologram can
+    be translucent without being an X-ray.
+
+    Pure additive light was fine for the built-in head — one closed shell —
+    but a real model is layers: hair over hair, a mouth and eyeballs inside
+    the skull, the back of the head behind the face. All of it added up over
+    the features until the face was the darkest thing on screen. Points behind
+    the front-most surface in their cell now keep only `behind` of their light.
+
+    Cells are sized so each holds ~5 front samples (a hole is then e^-5 ≈ 1 %
+    likely), and empty cells borrow their neighbours' depth so a sparse patch
+    of the front does not let the back shine through it. ~1 ms at 44 k points.
+    """
+
+    def __init__(self, xs, ys, z, w: int, h: int, n_front: int) -> None:
+        self.cell = cell = float(np.clip(math.sqrt(5.0 * w * h * 0.45 / max(1, n_front)), 2.0, 14.0))
+        self.gw, self.gh = int(w / cell) + 2, int(h / cell) + 2
+        zf = np.full(self.gw * self.gh, -1e9, dtype=np.float32)
+        np.maximum.at(zf, self._key(xs, ys), z.astype(np.float32))
+        g = zf.reshape(self.gh, self.gw)
+        p = np.pad(g, 1, constant_values=-1e9)
+        dil = np.max(np.stack([p[1 + dy:1 + dy + self.gh, 1 + dx:1 + dx + self.gw]
+                               for dy in (-1, 0, 1) for dx in (-1, 0, 1)]), axis=0)
+        self.z = np.where(g > -1e8, g, dil).ravel()
+
+    def _key(self, xs, ys):
+        gx = np.clip((np.asarray(xs) / self.cell).astype(np.int32), 0, self.gw - 1)
+        gy = np.clip((np.asarray(ys) / self.cell).astype(np.int32), 0, self.gh - 1)
+        return gy * self.gw + gx
+
+    def light(self, xs, ys, z, eps: float, behind: float = 0.10):
+        """Light kept by each point: 1 on the front surface, fading to
+        `behind` over `eps` model units of depth beneath it."""
+        d = self.z[self._key(xs, ys)] - z
+        return behind + (1.0 - behind) * np.clip(1.0 - (d - eps) / eps, 0.0, 1.0)
 
 
 def surface_samples(verts: np.ndarray, faces: np.ndarray, n: int,

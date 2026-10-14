@@ -151,6 +151,10 @@ class HoloAvatar:
 
         self._lut_cache: list = []
         self._lut_key = None
+        # Per-head rig and motion: an imported model hinges its jaw where its
+        # own anatomy puts it, and HOLOGRAMA can calm or exaggerate the sway.
+        self._jaw_pivot = JAW_PIVOT
+        self.motion = 1.0
 
         n = self._v0.shape[0]
         self._v = np.empty((n, 3), dtype=np.float32)
@@ -429,42 +433,52 @@ class HoloAvatar:
 
     def _pose(self):
         """Jaw drop, brow lift and head rotation, applied to the real geometry."""
-        v = self._v
-        np.copyto(v, self._v0)
+        return self._pose_pts(self._v0, self._n0, self._v,
+                              self._jaw, self._brow_w, self._lips_w)
+
+    def _pose_pts(self, v0, n0, out, jaw, brow_w, lips_w):
+        """`_pose` for any set of rigged points — mesh vertices, or the surface
+        samples the hologram draws, which lets an imported million-triangle
+        model cost what its 44 k samples cost rather than what its vertices do.
+        Leaves the head rotation in `self._rot`."""
+        v = out
+        np.copyto(v, v0)
 
         if self._brow > 0.004 or self._brow < -0.004:
             # The brow-to-eye gap is 0.198 head-half-heights and a real raise
             # moves a third of it. The old 0.045 — halved again by the landmark
             # weights, which average 0.5 — worked out to six pixels on a 250 px
             # head, which is to say invisible.
-            v[:, 1] += self._brow_w * (self._brow * _BROW_LIFT)
+            v[:, 1] += brow_w * (self._brow * _BROW_LIFT)
 
         if abs(self._wide) > 0.01 and self._mouth > 0.0:
             # Spread pulls the corners out and flattens the lips back; rounding
             # draws them in and pushes them forward into a purse.
-            k = self._lips_w * (self._wide * self._mouth)
+            k = lips_w * (self._wide * self._mouth)
             v[:, 0] += k * (v[:, 0] - self._lip_c[0]) * 0.55
             v[:, 1] += k * (v[:, 1] - self._lip_c[1]) * 0.30
             v[:, 2] -= k * 0.055
 
         if self._mouth > 0.004:
-            px, py, pz = JAW_PIVOT
-            ang = self._jaw * (self._mouth * JAW_MAX)
+            px, py, pz = self._jaw_pivot
+            ang = jaw * (self._mouth * JAW_MAX)
             ca, sa = np.cos(ang), np.sin(ang)
             dy = v[:, 1] - py
             dz = v[:, 2] - pz
             v[:, 1] = py + dy * ca - dz * sa
             v[:, 2] = pz + dy * sa + dz * ca
 
-        cy, sy = math.cos(self._yaw), math.sin(self._yaw)
-        cp, sp = math.cos(self._pitch), math.sin(self._pitch)
+        yaw, pitch = self._yaw * self.motion, self._pitch * self.motion
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        cp, sp = math.cos(pitch), math.sin(pitch)
         m = np.array([
             [cy, 0.0, sy],
             [sp * sy, cp, -sp * cy],
             [-cp * sy, sp, cp * cy],
         ], dtype=np.float32)
+        self._rot = m
 
-        return v @ m.T, self._n0 @ m.T
+        return v @ m.T, n0 @ m.T
 
     # ── rendering ───────────────────────────────────────────────────────────
 

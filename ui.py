@@ -50,7 +50,8 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QSlider,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QGridLayout,
@@ -431,6 +432,10 @@ class HudCanvas(QWidget):
         # shown and then kept, so switching back is instant and costs no reload.
         # "core" has no object: it is _paint_core below.
         self._renderers: dict = {}
+        # Imported models load on a worker thread (style -> Future): the first
+        # read of a big file takes seconds — a 130 MB OBJ sculpt took ~60 s —
+        # and the HUD shows the reactor core until it is ready.
+        self._model_jobs: dict = {}
         try:
             from memory.config_manager import get_hud_style
             self.hud_style = get_hud_style()
@@ -481,11 +486,24 @@ class HudCanvas(QWidget):
         r = None
         try:
             if style == "face":
-                r = HoloHead() if HoloHead is not None else None
+                r = HoloHead(style="face") if HoloHead is not None else None
             elif style.startswith("model:") and HoloHead is not None:
-                from core.mesh_import import discover, load_avatar
-                path = discover().get(style)
-                r = HoloHead(mesh=load_avatar(path)) if path else None
+                job = self._model_jobs.get(style)
+                if job is None:
+                    from concurrent.futures import ThreadPoolExecutor
+                    from core.mesh_import import discover, load_avatar
+                    path = discover().get(style)
+                    if path is not None:
+                        ex = ThreadPoolExecutor(1, thread_name_prefix="avatar")
+                        self._model_jobs[style] = ex.submit(load_avatar, path)
+                        ex.shutdown(wait=False)
+                        return None
+                elif not job.done():
+                    return None
+                else:
+                    del self._model_jobs[style]
+                    # The GL buffer is made here, on the GUI thread.
+                    r = HoloHead(mesh=job.result(), style=style)
             elif style == "orb" and HoloOrb is not None:
                 r = HoloOrb()
             elif style == "holo" and HoloProjector is not None:
@@ -3268,6 +3286,379 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class HoloLookPanel(QWidget):
+    """✨ HOLOGRAMA — the hologram's look and anatomy, edited live, per model.
+
+    Docked over the right column rather than centred, so the hologram it is
+    tuning stays in view. Every change applies on the next frame; SALVAR keeps
+    it for this model (core.holo_look), and a named preset carries the look —
+    without the anatomy — to any other model.
+    """
+
+    _W = 400
+
+    def __init__(self, get_renderer, get_style, set_style, parent=None):
+        super().__init__(parent)
+        from core import holo_look
+        self._hl = holo_look
+        self._get_renderer = get_renderer      # () -> HoloHead | None
+        self._get_style = get_style            # () -> current style key
+        self._set_style = set_style            # (style) -> None, persists it
+        self._rend = None
+        self._loading = False                  # suppress slider → look while filling
+        self._dirty = False
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            HoloLookPanel {{ background: rgba(0, 6, 10, 242);
+                border: 1px solid {C.BORDER_B}; border-radius: 6px; }}
+            QLabel {{ background: transparent; color: {C.TEXT_MED}; }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: transparent; width: 6px; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 3px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QSlider::groove:horizontal {{ height: 3px; background: {C.BORDER}; }}
+            QSlider::sub-page:horizontal {{ background: {C.PRI_DIM}; }}
+            QSlider::handle:horizontal {{ background: {C.PRI}; width: 10px;
+                margin: -5px 0; border-radius: 5px; }}
+            QComboBox, QLineEdit {{ background: {C.PANEL}; color: {C.TEXT};
+                border: 1px solid {C.BORDER_B}; border-radius: 3px; padding: 2px 6px; }}
+            QComboBox QAbstractItemView {{ background: {C.PANEL}; color: {C.TEXT};
+                selection-background-color: {C.PRI_GHO}; }}
+            QCheckBox {{ color: {C.TEXT_MED}; background: transparent; }}
+        """)
+        btn_qss = f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; padding: 0 8px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            QPushButton:disabled {{ color: {C.TEXT_DIM}; border-color: {C.BORDER}; }}
+        """
+
+        def button(text, slot):
+            b = QPushButton(text)
+            b.setFixedHeight(24)
+            b.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(btn_qss)
+            b.clicked.connect(slot)
+            return b
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(6)
+
+        top = QHBoxLayout()
+        ttl = QLabel("✨  HOLOGRAMA")
+        ttl.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        ttl.setStyleSheet(f"color: {C.PRI};")
+        top.addWidget(ttl)
+        top.addStretch()
+        top.addWidget(button("✕  FECHAR", self.close_panel))
+        root.addLayout(top)
+
+        small = QFont("Courier New", 8)
+        row = QHBoxLayout()
+        lb = QLabel("Modelo")
+        lb.setFont(small)
+        row.addWidget(lb)
+        self._style_box = QComboBox()
+        self._style_box.setFont(small)
+        self._style_box.activated.connect(self._pick_style)
+        row.addWidget(self._style_box, 1)
+        root.addLayout(row)
+
+        row = QHBoxLayout()
+        lb = QLabel("Preset")
+        lb.setFont(small)
+        row.addWidget(lb)
+        self._preset_box = QComboBox()
+        self._preset_box.setFont(small)
+        self._preset_box.activated.connect(self._pick_preset)
+        row.addWidget(self._preset_box, 1)
+        root.addLayout(row)
+
+        row = QHBoxLayout()
+        self._save_btn = button("💾  SALVAR", self._save)
+        row.addWidget(self._save_btn)
+        row.addWidget(button("↺  PADRÃO", self._reset))
+        self._markers = QCheckBox("Marcadores")
+        self._markers.setFont(small)
+        self._markers.setToolTip("Mostra onde o holograma acha que estão olhos, "
+                                 "boca, queixo e o pivô da mandíbula")
+        self._markers.toggled.connect(self._toggle_markers)
+        row.addWidget(self._markers)
+        root.addLayout(row)
+
+        self._note = QLabel("")
+        self._note.setWordWrap(True)
+        self._note.setFont(QFont("Courier New", 7))
+        self._note.setStyleSheet(f"color: {C.TEXT_DIM};")
+        root.addWidget(self._note)
+
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        box = QVBoxLayout(inner)
+        box.setContentsMargins(0, 0, 8, 0)
+        box.setSpacing(2)
+        area.setWidget(inner)
+        root.addWidget(area, 1)
+
+        self._sliders: dict[str, tuple] = {}
+        self._group_widgets: dict[str, list] = {}
+        tiny = QFont("Courier New", 7)
+        for group in holo_look.GROUPS:
+            h = QLabel(f"◈ {group}" + ("  (modo realista)" if group == "LUZ" else ""))
+            h.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            h.setStyleSheet(f"color: {C.PRI}; border-bottom: 1px solid {C.BORDER}; "
+                            "padding-top: 8px;")
+            box.addWidget(h)
+            if group == "ESTILO":
+                row = QHBoxLayout()
+                lb = QLabel("Render")
+                lb.setFont(tiny)
+                row.addWidget(lb)
+                self._render_box = QComboBox()
+                self._render_box.setFont(tiny)
+                for k, v in holo_look.RENDER_MODES.items():
+                    self._render_box.addItem(v, k)
+                self._render_box.activated.connect(self._render_mode)
+                row.addWidget(self._render_box, 1)
+                box.addLayout(row)
+            if group == "OLHOS":
+                row = QHBoxLayout()
+                lb = QLabel("Estilo dos olhos")
+                lb.setFont(tiny)
+                row.addWidget(lb)
+                self._eye_box = QComboBox()
+                self._eye_box.setFont(tiny)
+                for k, v in holo_look.EYE_STYLES.items():
+                    self._eye_box.addItem(v, k)
+                self._eye_box.activated.connect(self._eye_style)
+                row.addWidget(self._eye_box, 1)
+                box.addLayout(row)
+            for key, label, lo, hi, _d, grp in holo_look.PARAMS:
+                if grp != group:
+                    continue
+                w = QWidget()
+                w.setStyleSheet("background: transparent;")
+                lay = QVBoxLayout(w)
+                lay.setContentsMargins(0, 2, 0, 2)
+                lay.setSpacing(0)
+                top_ = QHBoxLayout()
+                name = QLabel(label)
+                name.setFont(tiny)
+                val = QLabel("")
+                val.setFont(tiny)
+                val.setStyleSheet(f"color: {C.TEXT};")
+                top_.addWidget(name)
+                top_.addStretch()
+                top_.addWidget(val)
+                lay.addLayout(top_)
+                s = QSlider(Qt.Orientation.Horizontal)
+                s.setRange(0, 1000)
+                s.valueChanged.connect(lambda v, k=key: self._slid(k, v))
+                lay.addWidget(s)
+                box.addWidget(w)
+                self._sliders[key] = (s, val, lo, hi, w)
+        box.addStretch()
+
+        self._wait = QTimer(self)               # a model still loading
+        self._wait.setInterval(250)
+        self._wait.timeout.connect(self.bind)
+
+    # ── binding to the live renderer ────────────────────────────────────────
+    def bind(self) -> None:
+        """Attach to whatever the HUD is drawing now and show its look."""
+        from memory.config_manager import hud_styles
+        style = self._get_style()
+        self._loading = True
+        self._style_box.clear()
+        for k, v in hud_styles().items():
+            if k in ("face",) or k.startswith("model:"):
+                self._style_box.addItem(v, k)
+        i = self._style_box.findData(style)
+        if i >= 0:
+            self._style_box.setCurrentIndex(i)
+        self._preset_box.clear()
+        self._preset_box.addItem("— aplicar um preset —", None)
+        for k, (title, _l) in self._hl.PRESETS.items():
+            self._preset_box.addItem(title, k)
+        for name in self._hl.user_presets():
+            self._preset_box.addItem(f"★ {name}", name)
+        self._preset_box.addItem("＋ salvar o atual como preset…", "__new__")
+        self._loading = False
+
+        rend = self._get_renderer()
+        if rend is None or not hasattr(rend, "look"):
+            self._rend = None
+            self._set_enabled(False)
+            self._note.setText("Carregando o modelo…" if style.startswith("model:")
+                               else "Este estilo de HUD não é um holograma de cabeça — "
+                                    "escolha um modelo acima.")
+            if style.startswith("model:") and not self._wait.isActive():
+                self._wait.start()
+            return
+        self._wait.stop()
+        self._rend = rend
+        self._set_enabled(True)
+        self._markers.setChecked(bool(rend.show_markers))
+        self._fill()
+        self._dirty = False
+        self._update_note()
+
+    def _set_enabled(self, on: bool) -> None:
+        for s, *_ in self._sliders.values():
+            s.setEnabled(on)
+        self._eye_box.setEnabled(on)
+        self._render_box.setEnabled(on)
+        self._save_btn.setEnabled(on)
+
+    def _fill(self) -> None:
+        rend = self._rend
+        lk = rend.look
+        self._loading = True
+        for key, (s, val, lo, hi, w) in self._sliders.items():
+            v = float(lk.get(key) if lk.get(key) is not None else lo)
+            s.setValue(int(round((v - lo) / (hi - lo) * 1000)))
+            val.setText(f"{v:.2f}")
+            # Anatomy is measured on imported models; the built-in head has
+            # its own landmarks and nothing to calibrate.
+            anat = key in self._hl.ANATOMY_KEYS
+            # Calibration is for heads nothing could measure: landmarks and
+            # blend shapes already know where this face's features are.
+            w.setVisible(not anat or (rend.imported and rend.rig_kind == "sem rosto"))
+            if key == "surface":
+                s.setEnabled(rend.supports_surface)
+        i = self._eye_box.findData(lk.get("eye_style", "glow"))
+        self._eye_box.setCurrentIndex(max(0, i))
+        i = self._render_box.findData(lk.get("render", "holograma"))
+        self._render_box.setCurrentIndex(max(0, i))
+        self._render_box.setEnabled(rend.supports_surface)
+        self._loading = False
+
+    def _update_note(self) -> None:
+        rend = self._rend
+        if rend is None:
+            return
+        bits = [{"landmarks": "Rosto detectado (landmarks): boca e pálpebras no lugar exato.",
+                 "blendshapes": "Blendshapes do modelo: boca, piscar e olhar do próprio artista.",
+                 "sem rosto": "Nenhum rosto humano detectado: só um leve movimento do queixo.",
+                 "embutido": ""}.get(getattr(rend, "rig_kind", ""), "")]
+        if not rend.supports_surface:
+            bits.append("Superfície indisponível (sem GPU OpenGL 3.3) — só partículas.")
+        if self._dirty:
+            bits.append("• Alterações não salvas.")
+        else:
+            bits.append("Mudanças valem na hora; SALVAR guarda para este modelo.")
+        self._note.setText("  ".join(bits))
+
+    # ── edits ───────────────────────────────────────────────────────────────
+    def _slid(self, key: str, v: int) -> None:
+        s, val, lo, hi, _w = self._sliders[key]
+        x = lo + (hi - lo) * v / 1000.0
+        val.setText(f"{x:.2f}")
+        if self._loading or self._rend is None:
+            return
+        lk = dict(self._rend.look)
+        lk[key] = x
+        self._rend.set_look(lk)
+        self._mark_dirty()
+
+    def _eye_style(self, _i: int) -> None:
+        if self._loading or self._rend is None:
+            return
+        lk = dict(self._rend.look)
+        lk["eye_style"] = self._eye_box.currentData()
+        self._rend.set_look(lk)
+        self._mark_dirty()
+
+    def _render_mode(self, _i: int) -> None:
+        if self._loading or self._rend is None:
+            return
+        mode = self._render_box.currentData()
+        if mode == "realista" and self._rend.look.get("render") != "realista":
+            # Switching to a game character means dropping every hologram
+            # effect at once — the realistic preset, keeping this calibration.
+            cur = self._rend.look
+            lk = self._hl.preset("realista", {k: cur.get(k) for k in self._hl.ANATOMY_KEYS})
+        else:
+            lk = dict(self._rend.look)
+            lk["render"] = mode
+        self._rend.set_look(lk)
+        self._fill()
+        self._mark_dirty()
+
+    def _mark_dirty(self) -> None:
+        if not self._dirty:
+            self._dirty = True
+            self._update_note()
+
+    def _toggle_markers(self, on: bool) -> None:
+        if self._rend is not None:
+            self._rend.show_markers = bool(on)
+
+    def _pick_style(self, _i: int) -> None:
+        if self._loading:
+            return
+        style = self._style_box.currentData()
+        if style and style != self._get_style():
+            if self._rend is not None:
+                self._rend.show_markers = False
+            self._set_style(style)
+            self.bind()
+
+    def _pick_preset(self, _i: int) -> None:
+        if self._loading or self._rend is None:
+            return
+        key = self._preset_box.currentData()
+        self._preset_box.setCurrentIndex(0)
+        if key is None:
+            return
+        if key == "__new__":
+            self._ask_preset_name()
+            return
+        # A preset changes the look, never this model's calibrated anatomy.
+        cur = self._rend.look
+        anat = {k: cur.get(k) for k in self._hl.ANATOMY_KEYS}
+        lk = self._hl.preset(key, anat)
+        self._rend.set_look(lk)
+        self._fill()
+        self._mark_dirty()
+
+    def _ask_preset_name(self) -> None:
+        name, ok = QInputDialog.getText(self, "Novo preset",
+                                        "Nome do preset (leva o visual, não a anatomia):")
+        name = (name or "").strip()
+        if ok and name and self._rend is not None:
+            self._hl.save_preset(name, self._rend.look)
+            self.bind()
+            self._note.setText(f"Preset “{name}” salvo — aparece para todos os modelos.")
+
+    def _save(self) -> None:
+        if self._rend is None:
+            return
+        self._hl.save(self._get_style(), self._rend.look)
+        self._dirty = False
+        self._note.setText("Salvo. Este modelo abre sempre assim.")
+
+    def _reset(self) -> None:
+        if self._rend is None:
+            return
+        style = self._get_style()
+        self._hl.forget(style)
+        self._rend.set_look(self._hl.resolve(style, self._rend.anatomy, self._rend._gpu))
+        self._fill()
+        self._dirty = False
+        self._note.setText("Voltou ao padrão (anatomia detectada automaticamente).")
+
+    def close_panel(self) -> None:
+        self._wait.stop()
+        if self._rend is not None:
+            self._rend.show_markers = False
+        self.hide()
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -4278,6 +4669,8 @@ class MainWindow(QMainWindow):
                 (cw.height() - oh) // 2,
                 ow, oh,
             )
+        if getattr(self, "_holo_panel", None) is not None and self._holo_panel.isVisible():
+            self._position_holo_panel()
         # Camera preview — bottom-right corner of the center/HUD area
         pw = _CameraPreview._W
         ph = self._cam_preview.height() or _CameraPreview._H
@@ -4648,6 +5041,15 @@ class MainWindow(QMainWindow):
         vp_btn.setStyleSheet(_BTN_STYLE_PRI)
         vp_btn.clicked.connect(self._open_voice_persona)
         lay.addWidget(vp_btn)
+
+        holo_btn = QPushButton("✨  HOLOGRAMA")
+        holo_btn.setFixedHeight(26)
+        holo_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        holo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        holo_btn.setStyleSheet(_BTN_STYLE_PRI)
+        holo_btn.setToolTip("Aparência, olhos, boca e movimento do holograma — ao vivo, por modelo")
+        holo_btn.clicked.connect(self._open_holo_look)
+        lay.addWidget(holo_btn)
 
         cust_btn = QPushButton("⚙  CUSTOMISE ASSISTANT")
         cust_btn.setFixedHeight(26)
@@ -5829,6 +6231,28 @@ class MainWindow(QMainWindow):
         ov.show()
         ov.raise_()
         self._vp_overlay = ov
+
+    def _open_holo_look(self) -> None:
+        self._close_setup()
+        ov = getattr(self, "_holo_panel", None)
+        if ov is None:
+            from memory.config_manager import get_hud_style
+            ov = HoloLookPanel(lambda: self.hud._renderer(self.hud.hud_style),
+                               lambda: self.hud.hud_style, self._set_hud_style,
+                               parent=self.centralWidget())
+            self._holo_panel = ov
+        self._position_holo_panel()
+        ov.bind()
+        ov.show()
+        ov.raise_()
+
+    def _position_holo_panel(self) -> None:
+        ov = getattr(self, "_holo_panel", None)
+        if ov is None:
+            return
+        cw = self.centralWidget()
+        w = min(HoloLookPanel._W, cw.width() - 16)
+        ov.setGeometry(cw.width() - w - 8, 8, w, cw.height() - 16)
 
     def _apply_persona(self, key: str) -> None:
         from memory.config_manager import PERSONAS, get_persona, save_persona

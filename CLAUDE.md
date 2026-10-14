@@ -17,9 +17,13 @@ Assistente pessoal de IA por voz em tempo real (Windows/macOS/Linux), em Python 
 | `main.py` | `JarvisLive`: sessão Gemini Live, loops asyncio (mic, envio, recepção, playback), ferramentas "inline" (`screen_process`, `close_camera`, `live_camera`, memória, monitor, shutdown), reconexão/retomada de sessão |
 | `ui.py` | Toda a interface Qt (~6 mil linhas). `HudCanvas` = centro do HUD; `MainWindow` = janela; `JarvisUI` = fachada **thread-safe** usada pelo `main.py` (sempre via `pyqtSignal`, nunca tocar widget fora da thread Qt) |
 | `core/holo_engine.py`, `core/holo_gpu.py` | Motor de holograma: luz aditiva, bloom, scanlines, aberração. `make_buffer()` devolve o backend GPU (moderngl, offscreen) ou o numpy — mesma API (`points/lines/polyline/disc/compose`) |
-| `core/holo_head.py` | `HoloHead`: a cabeça como nuvem de luz (herda animação/lip-sync de `HoloAvatar`) |
+| `core/holo_head.py` | `HoloHead`: a cabeça como holograma (partículas + superfície), guiada por `self.look`; herda animação/lip-sync de `HoloAvatar` |
+| `core/holo_surface.py` | A malha real na GPU: modo holograma (depth pre-pass, fresnel, faixas, ruído) ou **realista** (personagem iluminado, opaco, MSAA, ACES). Rig no shader: mandíbula com costura afiada + cavidade/dentes, lábios por visema, globos oculares girando com o olhar, pálpebras desenhadas |
+| `core/face_rig.py` | Rig facial por landmarks: MediaPipe num render frontal (uma vez por modelo, cache `*.face.npy`) → linha exata dos lábios (triângulos-ponte viram o interior da boca com dentes), pálpebras pelo contorno real, íris de olho pintado segue o olhar. Sem rosto detectado → só queixo suave (nunca boca falsa) |
+| `core/blendshapes.py` | Morph targets do GLB (ARKit `jawOpen`/`eyeBlink*`, visemas Oculus/RPM, VRM `Fcl_*`, VRChat) mapeados para fala/piscar/olhar; quando existem, substituem o rig procedural |
+| `core/holo_look.py` | O "look" de cada estilo (parâmetros, presets, anatomia calibrada) — editado ao vivo em ⚙ SETUP → ✨ HOLOGRAMA (`HoloLookPanel` em `ui.py`), salvo em `config/holo_looks.json` |
 | `core/holo_viz.py` | Visualizadores de voz: `HoloOrb`, `HoloProjector` |
-| `core/mesh_import.py` | Importa OBJ/GLB de `assets/avatars/` como estilo de HUD (`model:<nome>`), com sidecar JSON opcional |
+| `core/mesh_import.py` | Importa OBJ/GLB de `assets/avatars/` como estilo de HUD (`model:<nome>`): isola a cabeça, orienta, amostra, detecta anatomia (olhos/nariz/boca/queixo), monta a malha da GPU; cache em `config/avatar_cache/` (suba `_VERSION` ao mudar o processamento) |
 | `core/avatar.py`, `core/avatar_mesh.py` | Animação/rig da cabeça e malha canônica do MediaPipe; o desenho chapado antigo fica só como fallback |
 | `core/gemini.py` | "Escada" de modelos para chamadas one-shot (cooldown por tipo de falha, timeout obrigatório). Toda chamada one-shot ao Gemini passa por aqui |
 | `core/voice_preview.py` | Amostras de voz para o seletor (TTS do Gemini, cache em `config/voice_cache/`) |
@@ -43,6 +47,7 @@ Assistente pessoal de IA por voz em tempo real (Windows/macOS/Linux), em Python 
 - Segredos que nunca entram no git: `config/api_keys.json`, `config/certs/`, `config/whatsapp_web/`, `memory/long_term.json`. Antes de commitar, confira `git status`.
 - Webcam no Windows: se nada abre, primeiro olhar Configurações → Privacidade → Câmera (`actions/screen_processor.camera_problem()` diagnostica). A câmera tem **um único dono**: o stream da UI (`MainWindow._cam_loop`); quem precisar de quadro usa `ui.camera_frame()`, nunca abre a câmera de novo.
 - O modelo Live **não** está na escada de `core/gemini.py` (modelos Live não são intercambiáveis); a voz é fixada na conexão — trocar voz reconstrói a sessão.
+- Notebook com Optimus (o do Irlan: RTX 3050 + Intel UHD): o OpenGL cai na GPU integrada por padrão; `core/holo_gpu._context` define `SHIM_MCCOMPAT` para usar a NVIDIA. Confira `GL_RENDERER` antes de medir desempenho.
 - O console do Windows pode não ser UTF-8: ao rodar scripts que imprimem emoji, use `PYTHONIOENCODING=utf-8`.
 
 ## graphify
