@@ -8,8 +8,9 @@
 ## 1. A ideia em uma frase
 Um **JARVIS de desktop que já funciona**: holograma no HUD, conversa por voz em tempo real pelo
 Gemini Live e mãos no computador. O fork evolui essa base, sem reescrever a arquitetura, até ela
-ler e cuidar dos seus projetos, notas e agenda, mostrar na tela o que está fazendo e aprender com o
-uso.
+ler e cuidar dos seus projetos, notas e agenda, **organizar a vida pessoal** (tarefas, rotina,
+estudos, finanças) com Notion e o cofre Obsidian de 10 anos, mostrar na tela o que está fazendo e
+aprender com o uso — gastando o mínimo em LLM.
 
 ## 2. Relação com os outros projetos
 - **Upstream (FatihMakes/Mark-LV):** a branch `main` espelha o upstream. Trazemos as novidades dele
@@ -40,8 +41,10 @@ uso.
 | D6 | Versão (2026-10-16) | Versionamento próprio `55.MINOR.PATCH` (55 = Mark LV), registrado no `CHANGELOG.md` e em tags `v55.x.y` em `irlan-dev`. Cada feature mesclada sobe o MINOR; correção sobe o PATCH. |
 | D7 | Memória do projeto (2026-10-16) | A memória que acompanha o repositório é: esta `VISAO.md` (decisões), `docs/conversas/` (resumo das conversas que geraram decisões), a constituição e as specs. A memória automática do Claude Code fica na máquina e não substitui estes arquivos. |
 | D8 | Integrações pessoais (2026-10-16) | Obsidian, Agenda, Gmail, Notion e Telegram entram como **plugins** (`plugins/`), não como ações, para manter `actions/` igual ao upstream. |
-| D9 | Banco da memória (2026-10-16, proposta) | Migrar `long_term.json` para **SQLite com FTS5** (biblioteca padrão), mantendo o desenho de núcleo no prompt + busca sob demanda. Postgres/Docker fica fora do LV. A confirmar na spec 004. |
-| D10 | Modelo do JARVIS (2026-10-16, a decidir pelo Irlan) | Ligar a cobrança da chave Gemini (sem mudar código) para sair da cota curta e do uso dos dados para treino; medir o custo de uma hora de voz antes de fixar o teto. Outros provedores só para código, via Claude Code. |
+| D9 | Banco da memória (2026-10-16, proposta) | Migrar `long_term.json` para **SQLite com FTS5** (biblioteca padrão), mantendo o desenho de núcleo no prompt + busca sob demanda; busca por sentido com embeddings privados (OpenAI `text-embedding-3-small`) numa segunda etapa. Postgres/Docker fica fora do LV. A confirmar na spec da memória. |
+| D10 | Gestão de LLMs (2026-10-16, revista no mesmo dia) | **Gemini grátis continua sendo a base** (voz e chamadas avulsas, como o criador desenhou). DeepSeek e OpenAI (créditos do Irlan) entram por um **roteador por tipo de tarefa e sensibilidade**: reserva barata quando o grátis esgota, DeepSeek para contexto longo não sensível, OpenAI para dado pessoal sensível e embeddings, com teto mensal por provedor. Cobrança do Gemini **não** é ligada agora; decisão só depois de medir o uso (spec 001). Análise: [`llm-gestao.md`](llm-gestao.md). |
+| D11 | Gestão pessoal (2026-10-16, proposta) | **Notion = bancada operacional** (tarefas, projetos, rotinas, cursos em andamento, finanças) e **Obsidian = memória de 10 anos** (diário, conhecimento, histórico estudantil, fechamentos mensais). O JARVIS captura, consulta e **destila** periodicamente o Notion para o Obsidian; cada dado tem um único dono. Análise: [`gestao-pessoal.md`](gestao-pessoal.md). |
+| D12 | Voz e dado sensível (2026-10-16, a decidir pelo Irlan) | Finanças/saúde ditas por voz passam pelo Gemini Live; no grátis isso pode virar treino. Opções: modo privado com chave paga só nesses momentos, ou sensível só por texto. Ver [`llm-gestao.md` §5](llm-gestao.md#5-o-ponto-que-exige-decisão-voz--dado-sensível). |
 
 ## 5. Roteiro
 Ordem pensada para que cada passo destrave o seguinte. Números de spec são **previstos** (o Spec
@@ -50,23 +53,25 @@ Kit numera na criação). Parecer e dependências de cada item em [`demandas.md`
 | Ordem | Spec | Feature | Por que nesta posição | Modelo sugerido p/ implementar |
 |---|---|---|---|---|
 | 0 | — | Estrutura de desenvolvimento (este PR) | Tudo o que vem depois usa | — |
-| 1 | 001 | Registro de erros + `report_problem` + base de `pytest` | Sem registro não se mede nem se corrige nada | Sonnet |
+| 1 | 001 | Registro de erros + **medição de uso de LLM** (tokens, custo, 429 por provedor) + `report_problem` + base de `pytest` | Sem registro não se mede, não se corrige e não se decide custo | Sonnet |
 | 2 | 002 | Aviso de espera garantido ("só um momento") | Ganho imediato de confiança; usa o registro para medir latência | Sonnet |
-| 3 | 003 | Pastas liberadas (política central de arquivos) | Fundação de auditoria, Obsidian e organização | Sonnet |
-| 4 | 004 | Memória em SQLite (FTS5, migração, backup) | Robustez; base de Telegram e rotinas | Sonnet |
-| 5 | 005 | Voz: diálogo afetivo quando suportado + jeito | Pequeno; testar cedo com a chave paga | Haiku/Sonnet |
-| 6 | 006 | Cartões no HUD (progresso, pesquisa, notícias) | Diferencial visual; os agentes vão usar | Opus no plano, Sonnet nas tarefas |
-| 7 | 007 | Auditoria de projetos (delegação ao Claude Code) | Precisa de 003; mostra resultado em cartão | Sonnet |
-| 8 | 008 | Plugin Obsidian | Precisa de 003 | Sonnet |
-| 9 | 009 | Plugins Google Agenda, depois Gmail (leitura) | Uso diário; e-mail com cuidado de injeção | Sonnet |
-| 10 | 010 | Agentes especialistas (pesquisa, código) | Reaproveita 006 e 007 | Opus no plano, Sonnet nas tarefas |
-| 11 | 011 | Bot do Telegram (com o PC ligado) | Precisa de 004; limite estrutural assumido | Sonnet |
-| 12 | 012 | Rotinas e particularidades | Precisa de 001 e 004 com dados acumulados | Opus no plano |
-| 13 | 013 | Notion | Só se o uso se confirmar | Sonnet |
+| 3 | 003 | Pastas liberadas (política central de arquivos) | Fundação de Obsidian, auditoria e organização | Sonnet |
+| 4 | 004 | Roteador de LLMs (Gemini grátis → DeepSeek/OpenAI; classe sensível; tetos) | Pré-requisito de privacidade e economia para tudo que vem depois (D10) | Opus no plano, Sonnet nas tarefas |
+| 5 | 005 | Memória em SQLite (FTS5, migração, backup; embeddings privados depois) | Robustez; base de Notion, Telegram e rotinas | Sonnet |
+| 6 | 006 | Plugin Obsidian (diário, inbox, notas de estudo nos modelos do cofre) | Gestão pessoal (D11); precisa de 003 | Sonnet |
+| 7 | 007 | Plugin Notion (criar bases; tarefas, projetos, rotinas, cursos) | Gestão pessoal (D11) | Sonnet |
+| 8 | 008 | Finanças no Notion (lançamento com confirmação, orçamento, metas, relatório) | Depende de 004, 007 e da decisão D12 | Opus no plano, Sonnet nas tarefas |
+| 9 | 009 | Destilação Notion → Obsidian + briefing de bom dia / boa noite | Fecha o ciclo da memória de 10 anos | Sonnet |
+| 10 | 010 | Cartões no HUD (progresso, dia, orçamento, pesquisa, notícias) | Diferencial visual; mostra o que 006–009 produzem | Opus no plano, Sonnet nas tarefas |
+| 11 | 011 | Auditoria de projetos (delegação ao Claude Code) | Precisa de 003; resultado em cartão | Sonnet |
+| 12 | 012 | Plugins Google Agenda, depois Gmail (leitura) | Uso diário; e-mail com cuidado de injeção | Sonnet |
+| 13 | 013 | Voz: diálogo afetivo + teste do Gemini 3.8 Live | Pequeno; pode subir na fila a qualquer momento | Haiku/Sonnet |
+| 14 | 014 | Agentes especialistas (pesquisa, código) | Reaproveita 004, 010 e 011 | Opus no plano, Sonnet nas tarefas |
+| 15 | 015 | Bot do Telegram (com o PC ligado) | Precisa de 005; limite estrutural assumido | Sonnet |
+| 16 | 016 | Rotinas e particularidades aprendidas | Precisa de 001, 005 e dados acumulados | Opus no plano |
 
 ## 6. Em aberto
-- **D10:** ligar a cobrança da chave Gemini e definir o teto mensal (passo do Irlan).
-- Caminho e convenções do cofre Obsidian (levantar na spec 008).
-- Se o Notion é usado de fato (decide se a spec 013 existe).
-- Criar as tags `v55.0.0` (base do upstream) e `v55.1.0` (trabalho do fork até `a56cb2a`) e enviá-las
-  ao `origin` — aguardando confirmação.
+- **D12:** voz + dado sensível — modo privado com chave paga só nesses momentos, ou sensível só por texto.
+- **D10:** tetos mensais de DeepSeek e OpenAI e a validade dos créditos (conferir nos painéis); revisar depois de duas semanas de medição (spec 001).
+- **D11:** bases e campos de cada área no Notion (tarefas, rotinas, cursos, finanças) — levantar no `/speckit-clarify` da spec 007.
+- Criar as tags `v55.0.0` (base do upstream) e `v55.1.0` (trabalho do fork até `a56cb2a`) e enviá-las ao `origin` — aguardando confirmação.

@@ -19,5 +19,14 @@ repositório do LVI. A edição no LVI foi desfeita (não tinha sido commitada).
 
 **Parecer das demandas:** [`demandas.md`](../demandas.md). Roteiro: [`VISAO.md` §5](../VISAO.md#5-roteiro).
 
-**Ficou para o Irlan:** ligar a cobrança da chave Gemini (D10); confirmar a criação das tags de
-versão; dizer se usa Notion de fato; caminho do cofre Obsidian.
+**Revisão no mesmo dia.** O Irlan corrigiu duas recomendações:
+- **LLMs:** "ligar a cobrança" foi precipitado; o nível grátis funciona bem (o criador desenhou o LV
+  para ele) e há créditos de DeepSeek e OpenAI. Virou a análise [`llm-gestao.md`](../llm-gestao.md)
+  e a D10: grátis como base, roteador por tarefa/sensibilidade, medir antes de pagar.
+- **Notion:** já era interesse declarado, junto do cofre Obsidian de 10 anos
+  (`C:\DESENVOLVIMENTO\OBSIDIAN`), para gestão pessoal completa (aprendizado, rotina, tarefas,
+  projetos, vida estudantil, finanças). Virou [`gestao-pessoal.md`](../gestao-pessoal.md), a D11 e
+  as specs 006–009.
+
+**Ficou para o Irlan:** decidir voz + dado sensível (D12); tetos de DeepSeek/OpenAI e validade dos
+créditos; bases e campos do Notion; confirmar a criação das tags de versão.

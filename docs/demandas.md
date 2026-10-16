@@ -13,16 +13,16 @@
 |---|---|---|---|---|---|
 | 1 | Plugins | Sistema pronto, nenhum plugin | Usar como casa das integrações pessoais | P | junto de cada integração |
 | 2 | Pastas liberadas | Só a pasta do usuário, sem escolha | Base de tudo que mexe em arquivo; fazer cedo | M | 003 |
-| 3 | Auditar projetos | Um arquivo por vez | Delegar a quem lê repositório inteiro (Claude Code) | M | 007 |
-| 4 | Obsidian / Notion | Nada | Obsidian sim, cedo; Notion só se for usado de fato | P / M | 008 / 013 |
-| 5 | Voz mais humana | Áudio nativo, afetivo desligado | Ganho real é pequeno e barato; testar, não reescrever | P | 005 |
-| 6 | LLM pago | Gemini grátis com escada | Ligar o pago já; Claude só para código | P | decisão + 007 |
-| 7 | Gmail / Agenda | Nada | Agenda primeiro; e-mail só lendo, envio por último | M + M | 009 |
-| 8 | Telegram com memória | Só envia, clicando no app | Possível só com o PC ligado; é o limite do LV | G | 011 |
-| 9 | Banco e memória | JSON + palavra-chave | Migrar para SQLite (FTS5); sem Postgres aqui | M | 004 |
-| 10 | Aprender rotinas | Nada | Não é "treinar modelo": é registrar e resumir | M | 012 |
-| 11 | Subagentes | Mecanismo existe, sem agentes | Dois especialistas com uso real, não um zoológico | M | 010 |
-| 12 | Cartões no HUD | Só vídeo no centro | Maior diferencial do LV; vale o investimento | G | 006 |
+| 3 | Auditar projetos | Um arquivo por vez | Delegar a quem lê repositório inteiro (Claude Code) | M | 011 |
+| 4 | Obsidian / Notion | Nada | Os dois, com papéis diferentes: Notion opera, Obsidian guarda 10 anos ([análise](gestao-pessoal.md)) | M + M | 006, 007, 008, 009 |
+| 5 | Voz mais humana | Áudio nativo, afetivo desligado | Ganho real é pequeno e barato; testar, não reescrever | P | 013 |
+| 6 | LLM pago | Gemini grátis com escada | Grátis continua a base; DeepSeek/OpenAI por roteador ([análise](llm-gestao.md)) | M | 001 (medir) + 004 |
+| 7 | Gmail / Agenda | Nada | Agenda primeiro; e-mail só lendo, envio por último | M + M | 012 |
+| 8 | Telegram com memória | Só envia, clicando no app | Possível só com o PC ligado; é o limite do LV | G | 015 |
+| 9 | Banco e memória | JSON + palavra-chave | Migrar para SQLite (FTS5); sem Postgres aqui | M | 005 |
+| 10 | Aprender rotinas | Nada | Não é "treinar modelo": é registrar e resumir | M | 016 |
+| 11 | Subagentes | Mecanismo existe, sem agentes | Dois especialistas com uso real, não um zoológico | M | 014 |
+| 12 | Cartões no HUD | Só vídeo no centro | Maior diferencial do LV; vale o investimento | G | 010 |
 | 13 | "Só um momento" | Existe no prompt | Falta a garantia que não depende do modelo | P | 002 |
 | 14 | Log de erros | Só console | Primeira coisa a fazer; alimenta todas as outras | P | 001 |
 
@@ -83,15 +83,18 @@ de contexto longo do Gemini, salva o relatório em Markdown, resume em voz e mos
 
 ## 4. Obsidian e Notion
 
-**Hoje.** Nenhum dos dois. Obsidian está no roadmap do criador ("LVI+").
+**Hoje.** Nenhum dos dois integrado. Existe o cofre `C:\DESENVOLVIMENTO\OBSIDIAN` (estrutura PARA,
+sincronizado por git, desenhado para durar 10 anos) e uma conta no Notion.
 
-**Parecer.** **Obsidian** é fácil e combina com o LV: o cofre é uma pasta de `.md`, local, grátis,
-sem API. Basta ser uma pasta liberada (demanda 2), respeitar a estrutura que você já usa (pastas,
-tags, links `[[...]]`) e escrever com desfazer. **Notion** exige integração pela API com token,
-paginação e um modelo de blocos trabalhoso; só vale se você realmente vive no Notion.
+**Parecer (revisto em 2026-10-16).** A primeira versão deste parecer tratou o Notion como opcional —
+errado: o objetivo é **gestão pessoal completa** (tarefas, rotina, projetos, estudos, finanças), e
+para isso os dois se complementam. O Notion é melhor para dado estruturado que muda todo dia; o
+Obsidian é o que garante a memória de 10 anos em Markdown puro. Usar só um força o outro papel a
+funcionar mal.
 
-**Recomendação.** Plugin `obsidian` (buscar, ler, criar nota seguindo um modelo, anexar ao diário),
-cedo. Notion por último, e só para leitura e criação de páginas, se o uso se confirmar.
+**Recomendação.** Notion como bancada operacional, Obsidian como arquivo permanente, e o JARVIS
+destilando um no outro. Análise completa, riscos e ordem em
+[`gestao-pessoal.md`](gestao-pessoal.md).
 
 ## 5. Voz mais humana e com emoção
 
@@ -109,19 +112,22 @@ algum modelo Live em uso aceitar) e do "jeito" no prompt, ambos baratos.
 (conferir com chamada real), mais um teste de escuta lado a lado. Remover o `core/tts.py` morto
 fica a critério (é do upstream; apagar dificulta merge).
 
-## 6. Modelos de LLM pagos
+## 6. Modelos de LLM (grátis, pagos e créditos)
 
-**Hoje.** Só Gemini grátis, com a escada de 9 modelos de [`core/gemini.py`](../core/gemini.py).
-`core/llm_client.py` (Ollama/LM Studio) é outra sobra sem uso.
+**Hoje.** Só Gemini grátis, com a escada de 9 modelos de [`core/gemini.py`](../core/gemini.py) — que
+o criador desenhou justamente para o nível gratuito (sessão Live descartável na frente, porque o
+pool do Live é separado do pool de texto que esgota). `core/llm_client.py` (Ollama/LM Studio) é
+sobra sem uso.
 
-**Parecer.** O nível grátis tem dois problemas reais: cota curta (rajadas esgotam até os modelos
-de reserva) e o Google pode usar o conteúdo para treino. Ligar a cobrança na chave **não exige
-código**. Para voz não há alternativa equivalente fora do Gemini Live hoje no projeto; trocar o
-cérebro da voz seria reescrever o `main.py`. Onde outro modelo realmente ganha é em código e
-análise longa, e isso já se resolve delegando ao Claude Code (demanda 3).
+**Parecer (revisto em 2026-10-16).** A primeira versão recomendava ligar a cobrança do Gemini
+sem ter avaliado o grátis — errado. O grátis funciona bem para o uso atual; o que falta é (a) medir
+quando ele esgota, (b) uma reserva barata quando esgotar, e (c) um destino privado para dado
+sensível, porque no grátis o Google pode usar o conteúdo para treino. Os créditos de DeepSeek e
+OpenAI resolvem (b) e (c) por centavos por mês.
 
-**Recomendação.** Decisão do usuário: ligar a cobrança da chave Gemini com teto mensal no AI
-Studio, e medir o custo de uma hora de voz antes de fixar o teto. Não abstrair provedores agora.
+**Recomendação.** Medir primeiro (spec 001), depois um roteador por tipo de tarefa e sensibilidade
+(spec 004). Análise completa, preços e a decisão pendente sobre voz + dado sensível em
+[`llm-gestao.md`](llm-gestao.md).
 
 ## 7. Gmail, Agenda (calendário)
 
@@ -234,5 +240,6 @@ latência (13) nem aprender rotina (10). E é pequeno.
 **Recomendação.** `logging` com arquivo rotativo em `logs/` mais um registro estruturado (JSON
 Lines) de falhas: ação, erro, contexto, versão (commit), com filtro de segredos. Uma ferramenta
 `report_problem` para quando você disser "não funcionou" (o JARVIS anota o que você esperava).
-Falhas iguais agrupadas. Uma skill do Claude Code (`lv-triage`) lê o registro e propõe issues ou
+Falhas iguais agrupadas. Na mesma spec, o **uso de LLM** (provedor, tokens, custo, 429) também é
+registrado: é o dado que decide a gestão de modelos ([`llm-gestao.md`](llm-gestao.md) §6). Uma skill do Claude Code (`lv-triage`) lê o registro e propõe issues ou
 specs, e você confirma antes de abrir qualquer issue.

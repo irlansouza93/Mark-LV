@@ -11,6 +11,9 @@ PATCH a cada correção. Tags: `v55.x.y`.
 - Estrutura de desenvolvimento própria: Spec Kit (`.specify/`, skills `speckit-*`), constituição
   v1.0.0, `docs/VISAO.md`, `docs/demandas.md` (parecer das 14 demandas), `docs/HARNESS.md`,
   `docs/conversas/`.
+- Análises `docs/llm-gestao.md` (Gemini grátis + DeepSeek + OpenAI por roteador, com classe
+  sensível) e `docs/gestao-pessoal.md` (Notion como bancada, Obsidian como memória de 10 anos);
+  roteiro refeito com as specs de gestão pessoal.
 - Agentes do projeto por modelo (`lv-implementer` Sonnet, `lv-quick` Haiku, `lv-reviewer` Opus),
   skills `lv-validate`, `lv-new-skill` e `lv-triage`, hook de `py_compile` e hook de sessão na nuvem.
 
