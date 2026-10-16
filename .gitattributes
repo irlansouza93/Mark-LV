@@ -1,2 +1,2 @@
-# Shell hooks run under bash; a CRLF checkout breaks them with ": command not found".
+# Shell hooks run under bash; a CRLF checkout breaks them ("command not found").
 *.sh text eol=lf
