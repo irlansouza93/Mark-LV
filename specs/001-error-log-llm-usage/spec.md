@@ -298,7 +298,9 @@ o modelo escolhe a ferramenta e confirma em voz.
 
 ## Assumptions
 
-- **Local e privado:** tudo fica em `logs/`, já no `.gitignore`; nada é enviado para fora. A
+- **Local e privado:** tudo fica em `logs/`, já no `.gitignore`; nada é enviado para fora. Os
+  registros são arquivos de texto comuns: o Irlan vê e apaga o que foi guardado abrindo ou apagando
+  os arquivos de `logs/` (constituição, Princípio VIII); o `CLAUDE.md` documenta isso. A
   triagem e a abertura de issues continuam manuais pela `lv-triage`, com confirmação do Irlan.
 - **Sem conteúdo de conversa nos registros:** o registro guarda nomes de ferramentas, argumentos
   filtrados e cortados e mensagens de erro — não a transcrição da conversa. A exceção é o relato,
