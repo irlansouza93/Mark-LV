@@ -2,14 +2,28 @@
 
 Assistente pessoal de IA por voz em tempo real (Windows/macOS/Linux), em Python + PyQt6, sobre a **Gemini Live API** (áudio nativo bidirecional). Fork de `FatihMakes/Mark-LV`, mantido por Irlan. Responda ao usuário em **português (pt-BR)**; código, comentários e textos da UI ficam em inglês, como no projeto original.
 
+## Leia antes de propor ou implementar
+1. [`.specify/memory/constitution.md`](.specify/memory/constitution.md) — regras não negociáveis de **como** construir (vence este arquivo em conflito).
+2. [`docs/VISAO.md`](docs/VISAO.md) — visão, decisões com data e roteiro. **Não re-discutir decisões registradas** sem o usuário pedir.
+3. [`docs/demandas.md`](docs/demandas.md) — estado atual e parecer de cada demanda do roteiro.
+4. [`docs/HARNESS.md`](docs/HARNESS.md) — como o Claude trabalha aqui: specs, hooks, skills, agentes por modelo.
+
+O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`): o LVI pode inspirar, mas trabalho do LV nunca edita, commita nem abre PR lá.
+
 ## Fluxo de trabalho
-- Desenvolvimento na branch **`irlan-dev`**; `main` acompanha o upstream. Não commitar direto na `main`.
-- Remotes: `origin` = fork (`irlansouza93/Mark-LV`), `upstream` = `FatihMakes/Mark-LV`. Nunca dar push no upstream.
+- `main` espelha o upstream e nunca recebe commit nosso. **`irlan-dev`** é a base de desenvolvimento.
+- **Feature** = spec do Spec Kit: `/speckit-specify` (a partir de `irlan-dev` atualizada) cria a branch `NNN-nome` e `specs/NNN-nome/`; depois `/speckit-clarify` → `/speckit-plan` → `/speckit-tasks` → `/speckit-analyze` → `/speckit-implement`. Manutenção sem spec: `fix/…`, `chore/…`, `docs/…`. Tudo volta por **PR para `irlan-dev`**.
+- **Modelos:** especificar/planejar/revisar na sessão principal (modelo mais forte); tarefas já planejadas → agente `lv-implementer` (Sonnet); mudanças mecânicas → `lv-quick` (Haiku); revisão independente → `lv-reviewer`. Nenhum agente faz commit/push/PR.
+- **Versão própria** `55.MINOR.PATCH` em [`CHANGELOG.md`](CHANGELOG.md) (seção "Unreleased" em todo PR); tags `v55.x.y`.
+- **Memória do projeto** = decisões na `docs/VISAO.md` + resumos em `docs/conversas/`. Decisão nova tomada em conversa → registrar lá, com data.
+- Remotes: `origin` = fork (`irlansouza93/Mark-LV`), `upstream` = `FatihMakes/Mark-LV`. Nunca dar push no upstream. Novidades do upstream: atualizar `main` e mesclar em `irlan-dev`.
 - Ambiente: `.venv/` (Python 3.14). Rodar: `.venv/Scripts/python.exe main.py`. Instalar deps: `python setup.py`.
-- Não há suíte de testes. Valide assim:
-  - `.venv/Scripts/python.exe -m py_compile <arquivos>` em tudo que mudou;
-  - UI/HUD: renderizar offscreen com `QT_QPA_PLATFORM=offscreen`, instanciar `ui.HudCanvas` / `ui.JarvisUI`, chamar `grab()` e olhar a imagem; medir ms/quadro (alvo < 15 ms — o HUD pinta a 20–30 Hz);
+- Verificação: skill **`lv-validate`** (passo a passo). Em resumo:
+  - `py_compile` em tudo que mudou (o hook `PostToolUse` já compila cada `.py` editado);
+  - lógica sem interface: `pytest` em `tests/` (a base de testes chega com a spec 001);
+  - UI/HUD: `tools/hud_bench.py --style <estilo> --out <png>` renderiza offscreen, salva o quadro e mede ms/quadro (alvo p95 < 15 ms — o HUD pinta a 20–30 Hz); olhe a imagem;
   - Gemini: chamadas reais usam a chave de `config/api_keys.json` e precisam rodar fora do sandbox.
+- Erros e relatos do JARVIS → skill **`lv-triage`** para virar fix ou spec. Nova habilidade do JARVIS → skill **`lv-new-skill`**.
 
 ## Mapa do código
 | Onde | O quê |
@@ -32,6 +46,8 @@ Assistente pessoal de IA por voz em tempo real (Windows/macOS/Linux), em Python 
 | `memory/config_manager.py` | Toda leitura/escrita de `config/api_keys.json` (flags, voz, estilo de HUD, dispositivos) |
 | `memory/memory_manager.py` | Memória de longo prazo (`memory/long_term.json`) + busca local `recall_memory` |
 | `dashboard/` | Controle remoto pelo celular (FastAPI + TLS próprio) |
+| `tools/` | Ferramentas de desenvolvimento do fork (não são do app): `hud_bench.py` mede e captura o HUD offscreen |
+| `specs/`, `.specify/`, `docs/` | Specs por feature, Spec Kit (templates, scripts, constituição) e documentação do fork |
 
 ## Convenções do projeto (siga ao editar)
 - **Comentários explicam o porquê, com números medidos** ("medido em 2.1 s…"), no tom do código existente. Comente decisões, não o óbvio.
