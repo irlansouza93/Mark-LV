@@ -87,10 +87,10 @@ alguns centavos — desde que vá para o provedor certo (§6).
 
 ## 6. Riscos e decisões
 
-1. **Privacidade da voz (a maior).** Finanças e saúde ditas por voz passam pelo Gemini Live; no
-   nível grátis isso pode virar treino do Google. Opções em
-   [`llm-gestao.md` §5](llm-gestao.md#5-o-ponto-que-exige-decisão-voz--dado-sensível) (modo privado
-   com chave paga só nesses momentos, ou sensível só por texto).
+1. **Privacidade da voz (a maior) — resolvida pela D12.** Finanças e saúde ditas por voz passam
+   pelo Gemini Live; no grátis isso pode virar treino. Decisão: **modo privado** com um segundo
+   projeto Google pago e teto baixo, só para assuntos sensíveis — entrar no modo *antes* de ditar
+   o dado. Detalhes em [`llm-gestao.md` §5](llm-gestao.md#5-voz--dado-sensível-modo-privado-d12).
 2. **Dinheiro no Notion:** números do Notion são ponto flutuante; para uso pessoal serve, mas
    valores devem ser gravados em centavos inteiros ou com 2 casas fixas, e o fechamento mensal
    confere a soma. Rendimentos de investimento entram **por lançamento** (você ou extrato), não por
@@ -104,11 +104,11 @@ alguns centavos — desde que vá para o provedor certo (§6).
 
 ## 7. Como entra no roteiro (detalhe em [`VISAO.md` §5](VISAO.md#5-roteiro))
 
-1. Roteador de LLM com classe "sensível" (pré-requisito de privacidade).
+1. Roteador de LLM com classe "sensível" e **modo privado** (D12) — pré-requisito de privacidade.
 2. **Plugin Obsidian:** diário, inbox, notas de estudo com os modelos do cofre.
 3. **Plugin Notion:** criar as bases, tarefas, projetos, rotinas, cursos (ler, criar, atualizar).
 4. **Finanças no Notion:** transações por voz/texto com confirmação, orçamento, metas, relatório.
 5. **Destilação e briefings:** diário automático, fechamento mensal, bom dia / boa noite.
 
 Antes da spec do Notion: listar com você as bases e campos de cada área (uma conversa de
-`/speckit-clarify`), e decidir a questão de privacidade da voz.
+`/speckit-clarify`). A privacidade da voz já está decidida (modo privado, D12) e entra na spec 004.

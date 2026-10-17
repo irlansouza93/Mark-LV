@@ -28,5 +28,8 @@ repositório do LVI. A edição no LVI foi desfeita (não tinha sido commitada).
   projetos, vida estudantil, finanças). Virou [`gestao-pessoal.md`](../gestao-pessoal.md), a D11 e
   as specs 006–009.
 
-**Ficou para o Irlan:** decidir voz + dado sensível (D12); tetos de DeepSeek/OpenAI e validade dos
+**Decidido em seguida (D12):** modo privado — um segundo projeto Google com cobrança e teto baixo,
+usado só quando o assunto é sensível; entra na spec 004.
+
+**Ficou para o Irlan:** criar o projeto privado quando a spec 004 estiver pronta; tetos de DeepSeek/OpenAI e validade dos
 créditos; bases e campos do Notion; confirmar a criação das tags de versão.

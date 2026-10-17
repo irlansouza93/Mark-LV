@@ -101,22 +101,55 @@ Como entra no código, sem quebrar o upstream:
 - Chamadas existentes migram aos poucos; recurso novo (Notion, finanças, memória) já nasce no
   roteador.
 
-## 5. O ponto que exige decisão: voz + dado sensível
+## 5. Voz + dado sensível: modo privado (D12)
 
 Tudo o que você **fala** para o JARVIS passa pela sessão Live. No nível grátis, dizer "gastei 230
 reais no remédio X" vai para o Google como dado que pode ser usado para treino — **mesmo que o
-lançamento depois seja processado na OpenAI**. Três saídas possíveis:
+lançamento depois seja processado na OpenAI**. Opções avaliadas: modo privado com chave paga,
+sensível só por texto, ou aceitar o grátis para tudo.
 
-1. **Modo privado sob demanda (recomendado para avaliar):** um segundo projeto Google com cobrança
-   ligada e teto baixo. Quando o assunto é sensível ("modo privado", ou automaticamente ao abrir
-   finanças/saúde), a sessão reconecta com a chave paga (trocar voz já reconstrói a sessão, então o
-   mecanismo existe). Paga-se só os minutos privados.
-2. **Sensível só por texto/tela:** finanças e saúde lançadas pelo Notion/painel, nunca por voz.
-   Custo zero, menos mágico.
-3. **Aceitar o grátis para tudo:** mais simples, mas contraria o Princípio VIII da constituição.
+**Decisão do Irlan (2026-10-16): modo privado.** Um segundo projeto Google, com cobrança ligada e
+teto baixo, usado só quando o assunto é sensível.
 
-Não usar vários projetos grátis para multiplicar cota: contorna os limites do Google e arrisca a
-conta.
+### Como funciona
+- **Duas chaves, dois projetos.** A atual (grátis) continua para tudo; a privada (paga) fica em
+  `config/api_keys.json` (ignorado pelo git), configurada em ⚙ SETUP.
+- **Entrar no modo:** por comando de voz ("modo privado"), por botão no HUD, ou automaticamente
+  quando uma ferramenta marcada como sensível (finanças, saúde) é chamada. A sessão Live reconecta
+  com a chave privada — o LV já reconstrói a sessão ao trocar de voz, então o mecanismo existe.
+- **Sair:** por comando, botão, ou depois de alguns minutos sem assunto sensível; volta ao grátis.
+- **O HUD deixa claro** quando o modo privado está ativo (cor/selo), para você saber onde está
+  falando.
+- **No modo privado**, chamadas avulsas sensíveis vão só para o Gemini pago ou para a OpenAI —
+  nunca para o Gemini grátis nem para o DeepSeek.
+
+### Cuidados de desenho (vão para a spec 004)
+1. **Entrar antes de falar.** A troca automática protege os turnos *seguintes*: a frase que
+   disparou a ferramenta sensível já foi ouvida pela sessão grátis. O caminho seguro é dizer
+   "modo privado" (ou abrir pelo HUD) antes de ditar o dado. A spec deve deixar isso explícito na
+   interface, não esconder.
+2. **A conversa não atravessa de volta.** Ao entrar, a sessão privada pode receber um resumo curto
+   e não sensível do que se falava. Ao sair, a sessão grátis **não** recebe a transcrição privada —
+   no máximo "houve uma conversa privada".
+3. **Memória sensível nunca entra no prompt grátis.** Hoje o núcleo da memória vai no prompt de
+   sistema em toda conexão (`format_memory_for_prompt`). Fatos marcados como sensíveis ficam fora
+   do prompt da sessão grátis e só aparecem no modo privado. Isso amarra a spec 004 à da memória
+   (005).
+4. **Teto duplo.** Teto de gasto mensal no próprio Google (AI Studio → Spend → Monthly spend cap)
+   e o medidor do JARVIS (aviso em 80%, sai do modo privado e avisa em 100%).
+5. **Não multiplicar cota grátis.** O projeto privado é pago de propósito; criar vários projetos
+   grátis para somar cota contorna os limites do Google e arrisca a conta.
+
+### Custo esperado
+Estimativa grosseira de US$ 1–3 por hora de voz no Live pago (o contexto é recontado a cada
+turno). Com ~10 min por dia de assunto sensível (~5 h/mês): **US$ 5–15/mês**. Sugestão de teto
+inicial: **US$ 5/mês**, revisto com a medição real (spec 001 registra o `usage_metadata` do Live).
+
+### O que o Irlan faz (quando a spec 004 estiver pronta)
+1. No [AI Studio](https://aistudio.google.com), criar um projeto novo (ex.: `jarvis-privado`),
+   ligar a cobrança e gerar uma chave nele.
+2. Na aba **Spend**, definir o **Monthly spend cap** (ex.: US$ 5).
+3. Colar a chave em ⚙ SETUP → modo privado.
 
 ## 6. Como decidir com dados (não com suposição)
 

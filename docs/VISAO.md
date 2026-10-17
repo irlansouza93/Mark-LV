@@ -44,7 +44,7 @@ aprender com o uso — gastando o mínimo em LLM.
 | D9 | Banco da memória (2026-10-16, proposta) | Migrar `long_term.json` para **SQLite com FTS5** (biblioteca padrão), mantendo o desenho de núcleo no prompt + busca sob demanda; busca por sentido com embeddings privados (OpenAI `text-embedding-3-small`) numa segunda etapa. Postgres/Docker fica fora do LV. A confirmar na spec da memória. |
 | D10 | Gestão de LLMs (2026-10-16, revista no mesmo dia) | **Gemini grátis continua sendo a base** (voz e chamadas avulsas, como o criador desenhou). DeepSeek e OpenAI (créditos do Irlan) entram por um **roteador por tipo de tarefa e sensibilidade**: reserva barata quando o grátis esgota, DeepSeek para contexto longo não sensível, OpenAI para dado pessoal sensível e embeddings, com teto mensal por provedor. Cobrança do Gemini **não** é ligada agora; decisão só depois de medir o uso (spec 001). Análise: [`llm-gestao.md`](llm-gestao.md). |
 | D11 | Gestão pessoal (2026-10-16, proposta) | **Notion = bancada operacional** (tarefas, projetos, rotinas, cursos em andamento, finanças) e **Obsidian = memória de 10 anos** (diário, conhecimento, histórico estudantil, fechamentos mensais). O JARVIS captura, consulta e **destila** periodicamente o Notion para o Obsidian; cada dado tem um único dono. Análise: [`gestao-pessoal.md`](gestao-pessoal.md). |
-| D12 | Voz e dado sensível (2026-10-16, a decidir pelo Irlan) | Finanças/saúde ditas por voz passam pelo Gemini Live; no grátis isso pode virar treino. Opções: modo privado com chave paga só nesses momentos, ou sensível só por texto. Ver [`llm-gestao.md` §5](llm-gestao.md#5-o-ponto-que-exige-decisão-voz--dado-sensível). |
+| D12 | Voz e dado sensível: **modo privado** (2026-10-16, decidido pelo Irlan) | Um **segundo projeto Google, com cobrança ligada e teto de gasto baixo**, com chave própria, usado **só quando o assunto é sensível** (finanças, saúde, dados pessoais). Fora disso a voz segue no projeto grátis. A sessão Live reconecta com a chave privada ao entrar no modo (por comando de voz, botão no HUD ou automaticamente quando uma ferramenta sensível é chamada) e volta ao grátis ao sair; o HUD mostra claramente quando o modo privado está ativo. No modo privado, nenhuma chamada sensível cai no Gemini grátis nem no DeepSeek. Detalhes em [`llm-gestao.md` §5](llm-gestao.md#5-voz--dado-sensível-modo-privado-d12). |
 
 ## 5. Roteiro
 Ordem pensada para que cada passo destrave o seguinte. Números de spec são **previstos** (o Spec
@@ -56,11 +56,11 @@ Kit numera na criação). Parecer e dependências de cada item em [`demandas.md`
 | 1 | 001 | Registro de erros + **medição de uso de LLM** (tokens, custo, 429 por provedor) + `report_problem` + base de `pytest` | Sem registro não se mede, não se corrige e não se decide custo | Sonnet |
 | 2 | 002 | Aviso de espera garantido ("só um momento") | Ganho imediato de confiança; usa o registro para medir latência | Sonnet |
 | 3 | 003 | Pastas liberadas (política central de arquivos) | Fundação de Obsidian, auditoria e organização | Sonnet |
-| 4 | 004 | Roteador de LLMs (Gemini grátis → DeepSeek/OpenAI; classe sensível; tetos) | Pré-requisito de privacidade e economia para tudo que vem depois (D10) | Opus no plano, Sonnet nas tarefas |
+| 4 | 004 | Roteador de LLMs (Gemini grátis → DeepSeek/OpenAI; classe sensível; tetos) + **modo privado** da voz (D12) | Pré-requisito de privacidade e economia para tudo que vem depois (D10, D12) | Opus no plano, Sonnet nas tarefas |
 | 5 | 005 | Memória em SQLite (FTS5, migração, backup; embeddings privados depois) | Robustez; base de Notion, Telegram e rotinas | Sonnet |
 | 6 | 006 | Plugin Obsidian (diário, inbox, notas de estudo nos modelos do cofre) | Gestão pessoal (D11); precisa de 003 | Sonnet |
 | 7 | 007 | Plugin Notion (criar bases; tarefas, projetos, rotinas, cursos) | Gestão pessoal (D11) | Sonnet |
-| 8 | 008 | Finanças no Notion (lançamento com confirmação, orçamento, metas, relatório) | Depende de 004, 007 e da decisão D12 | Opus no plano, Sonnet nas tarefas |
+| 8 | 008 | Finanças no Notion (lançamento com confirmação, orçamento, metas, relatório) | Depende de 004 (modo privado) e 007 | Opus no plano, Sonnet nas tarefas |
 | 9 | 009 | Destilação Notion → Obsidian + briefing de bom dia / boa noite | Fecha o ciclo da memória de 10 anos | Sonnet |
 | 10 | 010 | Cartões no HUD (progresso, dia, orçamento, pesquisa, notícias) | Diferencial visual; mostra o que 006–009 produzem | Opus no plano, Sonnet nas tarefas |
 | 11 | 011 | Auditoria de projetos (delegação ao Claude Code) | Precisa de 003; resultado em cartão | Sonnet |
@@ -71,7 +71,7 @@ Kit numera na criação). Parecer e dependências de cada item em [`demandas.md`
 | 16 | 016 | Rotinas e particularidades aprendidas | Precisa de 001, 005 e dados acumulados | Opus no plano |
 
 ## 6. Em aberto
-- **D12:** voz + dado sensível — modo privado com chave paga só nesses momentos, ou sensível só por texto.
+- **D12:** criar o projeto Google privado com cobrança e teto (passo do Irlan, quando a spec 004 estiver pronta); confirmar o teto inicial sugerido de US$ 5/mês.
 - **D10:** tetos mensais de DeepSeek e OpenAI e a validade dos créditos (conferir nos painéis); revisar depois de duas semanas de medição (spec 001).
 - **D11:** bases e campos de cada área no Notion (tarefas, rotinas, cursos, finanças) — levantar no `/speckit-clarify` da spec 007.
 - Criar as tags `v55.0.0` (base do upstream) e `v55.1.0` (trabalho do fork até `a56cb2a`) e enviá-las ao `origin` — aguardando confirmação.
