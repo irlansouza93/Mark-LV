@@ -1,5 +1,8 @@
 """core/errlog.py — the pure helpers (no disk, no threads, no clock of their own)."""
 import calendar
+import hashlib
+import json
+import re
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -200,3 +203,167 @@ def test_quota_reset_works_without_pacific_zoneinfo(monkeypatch):
 def test_quota_reset_with_system_local_tz_returns_aware_datetime():
     got = errlog.quota_reset_local(datetime(2026, 10, 16, 15, 40, tzinfo=UTC), None)
     assert got.tzinfo is not None
+
+
+# ── signature (research R5) ──────────────────────────────────────────────────
+def test_signature_is_twelve_hex_of_sha1():
+    sig = errlog.signature("plugin", "spotify", "ValueError", "plugins/spotify.py:run")
+    assert re.fullmatch(r"[0-9a-f]{12}", sig)
+    expected = hashlib.sha1(b"plugin:spotify|ValueError|plugins/spotify.py:run").hexdigest()[:12]
+    assert sig == expected
+    assert sig != errlog.signature("plugin", "spotify", "KeyError", "plugins/spotify.py:run")
+    assert sig != errlog.signature("action", "spotify", "ValueError", "plugins/spotify.py:run")
+    assert sig != errlog.signature("plugin", "spotify", "ValueError", "plugins/spotify.py:other")
+
+
+def _raise_a():
+    raise ValueError("first line")
+
+
+def _tb_of(fn):
+    try:
+        fn()
+    except Exception as e:
+        return e.__traceback__
+
+
+def test_signature_ignores_line_numbers():
+    # Same function, two different raise lines: the origin (hence the signature) is equal.
+    def go(flag):
+        if flag:
+            raise ValueError("here")
+        raise ValueError("there")
+    tbs = []
+    for flag in (True, False):
+        try:
+            go(flag)
+        except ValueError as e:
+            tbs.append(e.__traceback__)
+    (o1, l1), (o2, l2) = (errlog.innermost_project_frame(t, errlog.ROOT) for t in tbs)
+    assert o1 == o2 and l1 != l2
+    assert errlog.signature("tool", "x", "ValueError", o1) == errlog.signature("tool", "x", "ValueError", o2)
+
+
+# ── innermost_project_frame ──────────────────────────────────────────────────
+def test_innermost_frame_of_a_test_function():
+    origin, line = errlog.innermost_project_frame(_tb_of(_raise_a), errlog.ROOT)
+    assert origin == "tests/test_errlog_pure.py:_raise_a"
+    assert isinstance(line, int) and line > 0
+
+
+def test_innermost_frame_skips_stdlib_frames():
+    def parse_bad_json():
+        json.loads("{not json")                     # raises deep inside the stdlib json package
+    origin, _ = errlog.innermost_project_frame(_tb_of(parse_bad_json), errlog.ROOT)
+    assert origin == "tests/test_errlog_pure.py:parse_bad_json"
+
+
+def test_innermost_frame_skips_site_packages_inside_the_project(tmp_path):
+    lib = tmp_path / ".venv" / "Lib" / "site-packages" / "fakepkg.py"
+    app = tmp_path / "app" / "mod.py"
+    ns: dict = {}
+    exec(compile("def lib_fail():\n    raise ValueError('inside a dependency')\n", str(lib), "exec"), ns)
+    exec(compile("def run():\n    lib_fail()\n", str(app), "exec"), ns)
+    origin, line = errlog.innermost_project_frame(_tb_of(ns["run"]), tmp_path)
+    assert origin == "app/mod.py:run" and line == 2
+
+
+def test_innermost_frame_none_when_nothing_belongs_to_the_project(tmp_path):
+    assert errlog.innermost_project_frame(_tb_of(_raise_a), tmp_path) is None
+    assert errlog.innermost_project_frame(None, errlog.ROOT) is None
+
+
+# ── classify_soft_failure (research R1) ──────────────────────────────────────
+@pytest.mark.parametrize("text, expected", [
+    ("Could not save: [Errno 13] C:\\x\\y.txt", "soft:could not save"),
+    ("Could not open 'report 2024.xlsx' (3 tries)", "soft:could not open"),
+    ("Unable to reach the printer at 192.168.0.4", "soft:unable to reach"),
+    ("Click failed: element not found", "soft:click failed"),
+    ("Click error: no window", "soft:click error"),
+    ("Search failed: HTTP 503", "soft:search failed"),
+    ("Error opening the camera", "soft:error opening the"),
+    ("Error: boom", "soft:error"),
+])
+def test_soft_failure_is_recognised_with_a_stable_prefix(text, expected):
+    assert errlog.classify_soft_failure(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Done.", "Opened Excel", "", "Saved 3 files", "No results found for cats",
+    "Tool 'open_app' failed: boom",
+    "Sir, the 'spotify' plugin failed: boom",
+    "Everything went fine, there was no error: just a word in the middle of a long sentence",
+])
+def test_normal_results_are_not_soft_failures(text):
+    assert errlog.classify_soft_failure(text) is None
+
+
+def test_soft_failure_prefix_ignores_numbers_paths_and_quotes():
+    a = errlog.classify_soft_failure("Could not save: C:\\a\\1.txt")
+    b = errlog.classify_soft_failure("Could not save: /home/u/2.txt")
+    c = errlog.classify_soft_failure("could not save 'x'")
+    assert a == b == c == "soft:could not save"
+
+
+# ── group ────────────────────────────────────────────────────────────────────
+def _rec(sig, ts, app="55.1.0+aaa", **kw):
+    base = {"signature": sig, "ts": ts, "app": app, "component": "plugin", "name": "p",
+            "error_type": "ValueError", "origin": "plugins/p.py:run", "message": "m"}
+    base.update(kw)
+    return base
+
+
+def test_group_counts_and_orders():
+    recs = [_rec("aaa", f"2026-10-16T10:0{i}:00-03:00") for i in range(5)]
+    recs += [_rec("bbb", "2026-10-16T09:00:00-03:00", app="55.1.0+bbb", name="q"),
+             _rec("bbb", "2026-10-16T11:30:00-03:00", app="55.2.0+ccc", name="q")]
+    groups = errlog.group(recs)
+    assert [g["signature"] for g in groups] == ["aaa", "bbb"]
+    a, b = groups
+    assert a["count"] == 5 and b["count"] == 2
+    assert a["first_ts"] == "2026-10-16T10:00:00-03:00" and a["last_ts"] == "2026-10-16T10:04:00-03:00"
+    assert b["first_ts"] == "2026-10-16T09:00:00-03:00" and b["last_ts"] == "2026-10-16T11:30:00-03:00"
+    assert a["versions"] == ["55.1.0+aaa"] and b["versions"] == ["55.1.0+bbb", "55.2.0+ccc"]
+    assert (a["component"], a["name"], a["error_type"], a["origin"]) == ("plugin", "p", "ValueError", "plugins/p.py:run")
+    assert a["example"]["message"] == "m"
+
+
+def test_group_counts_suppressed_burst_records():
+    recs = [_rec("aaa", "2026-10-16T10:00:00-03:00"),
+            _rec("aaa", "2026-10-16T10:01:00-03:00", suppressed=40)]
+    (g,) = errlog.group(recs)
+    assert g["count"] == 41                                  # 1 written + 40 held back (the summary stands for 40)
+
+
+def test_group_ignores_records_without_signature():
+    groups = errlog.group([{"kind": "report"}, _rec("aaa", "2026-10-16T10:00:00-03:00")])
+    assert len(groups) == 1 and groups[0]["count"] == 1
+
+
+# ── classify_live_error (the cues main.py's connection loop already uses) ────
+@pytest.mark.parametrize("err, resumed, expected", [
+    ("1011 429 RESOURCE_EXHAUSTED. quota exceeded", False, "quota"),
+    ("Session resumption handle is invalid", True, "handle"),
+    ("404 NOT_FOUND", True, "handle"),
+    ("INVALID_ARGUMENT: bad handle", True, "handle"),
+    ("404 NOT_FOUND model xyz", False, "other"),
+    ("TimeoutError()", False, "net"),
+    ("connection timed out", False, "net"),
+    ("[Errno 11001] getaddrinfo failed", False, "net"),
+    ("ConnectionRefusedError: [WinError 1225]", False, "net"),
+    ("OSError: [WinError 10054] connection reset", False, "net"),
+    ("Cannot connect to host generativelanguage.googleapis.com", False, "net"),
+    ("API key not valid. Please pass a valid API key.", False, "key"),
+    ("400 INVALID_ARGUMENT. API key not valid", False, "key"),
+    ("received 1007 (invalid frame payload data)", False, "key"),
+    ("INVALID_ARGUMENT: Unknown name \"proactivity\"", False, "config"),
+    ("got an unexpected keyword argument 'x'", False, "config"),
+    ("something nobody has seen before", False, "other"),
+    ("", False, "other"),
+])
+def test_classify_live_error(err, resumed, expected):
+    assert errlog.classify_live_error(err, resumed) == expected
+
+
+def test_classify_live_error_resumed_defaults_to_false():
+    assert errlog.classify_live_error("404 NOT_FOUND") == "other"

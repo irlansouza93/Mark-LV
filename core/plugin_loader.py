@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from core import errlog
 from memory.config_manager import get_plugin_enabled, get_plugin_config
 
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
@@ -96,6 +97,7 @@ class PluginRegistry:
             self._logger(f"Plugin '{name}' crashed during run(): {e}")
             self._notify(f"Plugin '{name}' failed — see the console for details.")
             traceback.print_exc()
+            errlog.record_failure("plugin", name, exc=e, phase="run", context={"args": parameters})
             return f"Sir, the '{name}' plugin failed: {e}"
 
     # -- called by ui.py's settings tab to render per-plugin config forms --
@@ -263,6 +265,7 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
             rec = PluginRecord(name=path.stem, file=path.name,
                                 error=_load_error(path, plugins_dir, e))
             traceback.print_exc()
+            errlog.record_failure("plugin", path.stem, exc=e, phase="load", message=rec.error)
 
         all_records.append(rec)
         if rec.valid:

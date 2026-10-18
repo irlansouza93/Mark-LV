@@ -64,6 +64,23 @@ def test_sensitive_dict_keys_mask_the_whole_string_value():
     assert out["name"] == "visible"
 
 
+def test_key_is_only_sensitive_as_a_final_or_isolated_word():
+    # "keys: ctrl+c" (keyboard action) and "hotkey"/"monkey" must stay readable for triage.
+    harmless = {"keys": "ctrl+c", "hotkey": "ctrl+alt+j", "monkey": "banana",
+                "keyboard": "us", "key_count": "3"}
+    assert redact(harmless) == harmless
+    for name in ("key", "api_key", "apiKey", "gemini_api_key", "x-api-key", "API_KEY",
+                 "APIKEY", "private_key"):
+        out = redact({name: "value-that-is-secret"})
+        assert out[name].startswith("‹redacted"), name
+
+
+def test_other_sensitive_words_match_anywhere_in_the_name():
+    for name in ("bot_token", "tokenizer_note", "client_secret", "db_password",
+                 "Authorization", "set_cookie", "mypasswordhint"):
+        assert redact({name: "plain text value"})[name].startswith("‹redacted"), name
+
+
 def test_sensitive_key_names_do_not_swallow_numbers_or_containers():
     # UsageRecord has a "tokens" object: it must survive redaction intact.
     rec = {"tokens": {"in_text": 120, "out_text": 30}, "max_tokens": 256, "ok": True}

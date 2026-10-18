@@ -26,6 +26,7 @@ I/O of their own beyond what their docstring says, so tests run them directly.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
 import math
@@ -36,6 +37,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -242,6 +244,149 @@ def quota_reset_local(now_utc: datetime, local_tz) -> datetime:
     return nxt.astimezone(local_tz)
 
 
+# ── Signature, origin, grouping (research R5) ────────────────────────────────
+def signature(component, name, error_type, origin) -> str:
+    """12 hex chars identifying "the same failure": component, name, error type and the
+    innermost project frame as ``file.py:function`` — deliberately WITHOUT a line number,
+    which changes on every edit and would split one bug into many groups."""
+    return hashlib.sha1(f"{component}:{name}|{error_type}|{origin}".encode("utf-8", "replace")).hexdigest()[:12]
+
+
+# Directories whose files belong to someone else even when they sit under the project root
+# (this repo keeps its venv in .venv/).
+_FOREIGN_DIRS = {".venv", "venv", "site-packages", "dist-packages"}
+
+
+def _project_rel(filename: str, root: Path) -> str | None:
+    """``filename`` relative to ``root`` with forward slashes, or None when it is outside."""
+    if not filename or filename.startswith("<"):
+        return None
+    root_s = os.path.abspath(root)
+    path = os.path.abspath(filename)
+    if not os.path.normcase(path).startswith(os.path.normcase(root_s) + os.sep):
+        return None
+    return path[len(root_s) + 1:].replace("\\", "/")
+
+
+def innermost_project_frame(tb, root: Path = ROOT):
+    """The deepest traceback frame that is project code, as ``("rel/path.py:function", line)``.
+    Frames in the stdlib, in site-packages and in ``.venv`` are skipped, so an error raised
+    deep inside a library is attributed to the line of ours that called it. None when no
+    frame belongs to the project."""
+    found = None
+    while tb is not None:
+        code = tb.tb_frame.f_code
+        rel = _project_rel(code.co_filename, root)
+        if rel is not None and not (_FOREIGN_DIRS & {p.lower() for p in rel.split("/")}):
+            found = (f"{rel}:{code.co_name}", tb.tb_lineno)
+        tb = tb.tb_next
+    return found
+
+
+# ── Soft failures (research R1) ──────────────────────────────────────────────
+# Most actions catch their own exceptions and return a sentence ("Could not save: …").
+# Those never reach a loader, so the tool dispatcher shows each result to this
+# classifier. It is conservative on purpose: the result must START like an error, so a
+# normal sentence that happens to contain the word "error" is not a failure.
+_SOFT_START = re.compile(r"^(?:could not|couldn't|unable to|error\b)", re.I)
+_SOFT_LABELLED = re.compile(r"^(?:\S+\s+){0,3}(?:failed|error):", re.I)       # "Click failed: …"
+# Results the loaders already recorded as a crash: counting them again would double them.
+_SOFT_ALREADY = re.compile(r"^(?:tool '[^']*' failed\b|sir, the '[^']*' plugin failed\b)", re.I)
+_QUOTED = re.compile(r"""(['"]).*?\1""")
+
+
+def classify_soft_failure(result) -> str | None:
+    """``"soft:could not save"`` when ``result`` reads like a swallowed error, else None.
+    The label is the first three plain words before any colon, lower-cased, with quoted
+    text, paths and numbers dropped — so the same failure on different files groups together."""
+    text = result.strip() if isinstance(result, str) else ""
+    if not text or _SOFT_ALREADY.match(text):
+        return None
+    if not (_SOFT_START.match(text) or _SOFT_LABELLED.match(text)):
+        return None
+    head = _QUOTED.sub(" ", text.split(":", 1)[0].lower())
+    head = " ".join(tok for tok in head.split() if "/" not in tok and "\\" not in tok)
+    words = re.findall(r"[a-z]+", head)
+    return "soft:" + (" ".join(words[:3]) or "unknown")
+
+
+def _ts_key(ts) -> float:
+    try:
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except Exception:
+        return 0.0
+
+
+def group(records) -> list:
+    """Failure records -> groups by signature, most frequent first. A record that carries
+    ``suppressed: N`` is the burst limiter's summary and stands for N occurrences that were
+    not written, so the count is the real number of times it happened."""
+    groups: dict = {}
+    for r in records:
+        sig = r.get("signature") if isinstance(r, dict) else None
+        if not sig:
+            continue
+        n = int(r.get("suppressed") or 1)
+        g = groups.get(sig)
+        if g is None:
+            groups[sig] = g = {"signature": sig, "count": 0, "first_ts": r.get("ts"), "last_ts": r.get("ts"),
+                               "versions": set(), "component": r.get("component"), "name": r.get("name"),
+                               "error_type": r.get("error_type"), "origin": r.get("origin"), "example": r}
+        g["count"] += n
+        if _ts_key(r.get("ts")) < _ts_key(g["first_ts"]):
+            g["first_ts"] = r.get("ts")
+        if _ts_key(r.get("ts")) >= _ts_key(g["last_ts"]):
+            g["last_ts"] = r.get("ts")
+            g["example"] = r
+        if r.get("app"):
+            g["versions"].add(r["app"])
+    out = []
+    for g in groups.values():
+        g["versions"] = sorted(g["versions"])
+        out.append(g)
+    out.sort(key=lambda g: (-g["count"], -_ts_key(g["last_ts"])))
+    return out
+
+
+# ── Voice connection errors (the cues main.py's connection loop already uses) ─
+_NET_CUES = ("TimeoutError", "timed out", "getaddrinfo", "CancelledError",
+             "ConnectionRefusedError", "OSError", "Cannot connect")
+_CONFIG_CUES = ("INVALID_ARGUMENT", "Unknown name", "unexpected keyword")
+
+
+def classify_live_error(err_str: str, resumed: bool = False) -> str:
+    """``quota | handle | net | key | config | other`` for a failed Live connection.
+
+    Same order of reasons as the loop in main.py. ``handle`` needs ``resumed``: only a
+    session opened with a resumption handle can have a rejected handle. A bad key is
+    checked before the generic INVALID_ARGUMENT because Google reports it as one."""
+    s = err_str or ""
+    low = s.lower()
+    if resumed and ("resum" in low or "handle" in low or "INVALID_ARGUMENT" in s or "NOT_FOUND" in s):
+        return "handle"
+    if "429" in s or "RESOURCE_EXHAUSTED" in s:
+        return "quota"
+    if "API key not valid" in s:
+        return "key"
+    if any(c in s for c in _CONFIG_CUES):
+        return "config"
+    if "1007" in s:
+        return "key"
+    if any(c in s for c in _NET_CUES):
+        return "net"
+    return "other"
+
+
+def ladder_message(reasons: dict, now: datetime | None = None) -> str:
+    """The one on-screen line for an exhausted Gemini ladder (research R12)."""
+    n = len(reasons)
+    quota = sum(1 for v in reasons.values() if v == "quota")
+    if n and quota * 2 > n:
+        back = quota_reset_local(now or datetime.now(_UTC), None)
+        return f"SYS: Gemini free quota used up on {quota} models — back at {back:%H:%M}."
+    return f"SYS: Gemini models not answering ({n} tried) — try again shortly."
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Queue + writer thread
 # ═════════════════════════════════════════════════════════════════════════════
@@ -314,6 +459,27 @@ def set_live_session(session_id: str | None) -> None:
     """Stamp the id of the active voice session on the records that follow."""
     global _live_session
     _live_session = session_id
+
+
+_live_attempts = 0
+
+
+def new_live_session() -> str:
+    """A short id for the voice session that just connected; stamped on every record until
+    the next one. Also zeroes the consecutive-failure counter, so ``attempt`` in a live
+    failure means "how many tries since the last time it worked"."""
+    global _live_attempts
+    _live_attempts = 0
+    sid = uuid.uuid4().hex[:8]
+    set_live_session(sid)
+    return sid
+
+
+def next_live_attempt() -> int:
+    """1, 2, 3… for consecutive failed connection attempts (reset by ``new_live_session``)."""
+    global _live_attempts
+    _live_attempts += 1
+    return _live_attempts
 
 
 def bind(*, notify=None, transcript=None) -> None:
@@ -507,19 +673,73 @@ def _emit(h: "_Rotating", line: str) -> None:
     h.emit(logging.LogRecord("errlog", logging.INFO, "", 0, line, None, None))
 
 
-def _write_record(stream: str, record: dict, ts: float, session) -> None:
+_FAILURE_ORDER = ("kind", "component", "name", "phase", "error_type", "message", "traceback",
+                  "origin", "origin_line", "signature", "context", "suppressed")
+
+# Burst limiter state (writer thread only): research R10 / spec SC-008.
+_burst = BurstLimiter()
+_held: dict = {}            # signature -> (prepared record, live session) of what was held back
+
+
+def _apply_exc(rec: dict, exc) -> None:
+    """Fill traceback / error_type / message from an exception object — on the writer
+    thread, because formatting a traceback costs 0.1-1 ms and the caller may be the
+    audio loop."""
+    try:
+        rec.setdefault("traceback", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        rec.setdefault("traceback", f"{type(exc).__name__} (traceback unavailable)")
+    rec.setdefault("error_type", type(exc).__name__)
+    if not rec.get("message"):
+        try:
+            rec["message"] = str(exc)
+        except Exception:
+            rec["message"] = f"<{type(exc).__name__}: str() failed>"
+
+
+def _prepare_failure(rec: dict, exc) -> None:
+    """Origin and signature of a failure (research R5). The origin is the innermost
+    project frame of the exception; failing that, the line of ours that reported it
+    (``_caller``, captured by ``record_failure``); failing that, ``component:name``."""
+    caller = rec.pop("_caller", None)
+    frame = None
+    if isinstance(exc, BaseException):
+        frame = innermost_project_frame(exc.__traceback__, ROOT)
+    if not rec.get("origin"):
+        if frame is not None:
+            rec["origin"], rec["origin_line"] = frame
+        elif caller:
+            rel = _project_rel(caller[0], ROOT) or os.path.basename(caller[0])
+            rec["origin"], rec["origin_line"] = f"{rel}:{caller[1]}", caller[2]
+        else:
+            rec["origin"] = f"{rec.get('component')}:{rec.get('name')}"
+    rec.setdefault("origin_line", None)
+    rec.setdefault("traceback", None)
+    rec.setdefault("error_type", rec.get("kind") or "unknown")
+    rec.setdefault("signature", signature(rec.get("component"), rec.get("name"),
+                                          rec["error_type"], rec["origin"]))
+
+
+def _write_record(stream: str, record: dict, ts: float, session, _summary: bool = False) -> None:
     if stream not in _STREAMS:
         _warn_once(f"stream:{stream}", f"[JARVIS] errlog: unknown log stream {stream!r}; record dropped.")
         return
     rec = dict(record)
     exc = rec.pop("exc", None)
     if isinstance(exc, BaseException):
-        rec.setdefault("traceback", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
-        rec.setdefault("error_type", type(exc).__name__)
-        rec.setdefault("message", str(exc))
+        _apply_exc(rec, exc)
+    if stream == "failures":
+        _prepare_failure(rec, exc)
+        if not _summary and not _burst.allow(rec["signature"], ts):
+            _held[rec["signature"]] = (rec, session)       # tallied; written as one summary per minute
+            return
     when = datetime.fromtimestamp(ts).astimezone()
     out = {"v": 1, "ts": when.isoformat(timespec="milliseconds"), "app": version(),
            "pid": os.getpid(), "live_session": session}
+    if stream == "failures":
+        for k in _FAILURE_ORDER:
+            if k in rec:
+                out[k] = rec[k]
     for k, v in rec.items():
         if k not in out:
             out[k] = v
@@ -541,6 +761,21 @@ def _write_record(stream: str, record: dict, ts: float, session) -> None:
         _warn_write_failed(e)
 
 
+_clock = time.time           # a seam: tests move the minute without sleeping
+
+
+def _drain_suppressed(force: bool = False) -> None:
+    """Write the "N more of these" summaries the burst limiter is holding (at most one
+    per signature per minute, or all of them at exit)."""
+    now = _clock()
+    for sig, n in _burst.drain_suppressed(now, force).items():
+        held = _held.pop(sig, None)
+        if held is None:
+            continue
+        rec, session = held
+        _write_record("failures", {**rec, "suppressed": n}, now, session, _summary=True)
+
+
 def _write_text(tag: str, line: str, ts: float) -> None:
     stamp = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     text = _cut(redact(_clean_str(line), _current_secrets()), _MAX_LINE)
@@ -552,7 +787,10 @@ def _write_text(tag: str, line: str, ts: float) -> None:
 
 def _writer_loop(q: queue.SimpleQueue) -> None:
     while True:
-        item = q.get()
+        try:
+            item = q.get(timeout=5.0)          # wakes up idle so a held burst summary is not stuck
+        except queue.Empty:
+            item = ("tick",)
         try:
             kind = item[0]
             if kind == "rec":
@@ -560,26 +798,34 @@ def _writer_loop(q: queue.SimpleQueue) -> None:
             elif kind == "text":
                 _write_text(item[1], item[2], item[3])
             elif kind == "flush":
+                if item[2]:
+                    _drain_suppressed(force=True)
                 item[1].set()
             elif kind == "stop":
+                _drain_suppressed(force=True)
                 item[1].set()
                 return
+            _drain_suppressed()
         except Exception as e:                  # one bad record must never end the thread
             try:
                 _warn_write_failed(e)
             except Exception:
                 pass
+            if item[0] in ("flush", "stop"):
+                item[1].set()
+                if item[0] == "stop":
+                    return
 
 
-def flush(timeout_s: float = 1.0) -> None:
-    """Wait (at most ``timeout_s``) until everything queued so far is on disk. Used by
-    ``atexit`` and by tests. Never raises."""
+def flush(timeout_s: float = 1.0, *, final: bool = False) -> None:
+    """Wait (at most ``timeout_s``) until everything queued so far is on disk. ``final``
+    (atexit) also writes the burst summaries still being held. Never raises."""
     try:
         q, t = _q, _thread
         if q is None or t is None or not t.is_alive():
             return
         done = threading.Event()
-        q.put(("flush", done))
+        q.put(("flush", done, final))
         done.wait(timeout_s)
     except Exception:
         pass
@@ -612,7 +858,104 @@ def _stop_writer_for_test() -> None:
 
 
 def _at_exit() -> None:
-    flush(1.0)
+    flush(1.0, final=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Recording failures (US1)
+# ═════════════════════════════════════════════════════════════════════════════
+def _kind_for(component, error_type) -> str:
+    if component == "gemini":
+        return "gemini"
+    if component == "live":
+        return "live"
+    if isinstance(error_type, str) and error_type.startswith("soft:"):
+        return "soft"
+    return "exception"
+
+
+def _enqueue_failure(kind, component, name, exc, error_type, message, phase, context, origin, caller) -> None:
+    """The one door every failure goes through — hooks, loaders, excepthooks — so each gets
+    the same signature, origin and burst limit. Only builds a dict; the writer does the rest."""
+    rec = {"kind": kind, "component": component, "name": name, "phase": phase,
+           "message": message or "", "context": dict(context) if isinstance(context, dict) else context}
+    if error_type:
+        rec["error_type"] = error_type
+    if origin:
+        rec["origin"] = origin
+    if exc is not None:
+        rec["exc"] = exc
+    if caller:
+        rec["_caller"] = caller
+    _enqueue("failures", rec)
+
+
+def record_failure(component: str, name: str, *, exc: BaseException | None = None,
+                   error_type: str | None = None, message: str = "", phase: str | None = None,
+                   context: dict | None = None, origin: str | None = None) -> None:
+    """Record one failure in logs/failures.jsonl. Never raises; costs a dict and a queue put.
+
+    ``exc`` gives the traceback and the origin (innermost project frame). Without it the
+    origin is the caller of this function — which is stable per call site, so "the same
+    failure" still groups."""
+    try:
+        f = sys._getframe(1)
+        _enqueue_failure(_kind_for(component, error_type), component, name, exc, error_type,
+                         message, phase, context, origin,
+                         (f.f_code.co_filename, f.f_code.co_name, f.f_lineno))
+    except Exception:
+        pass
+
+
+# Last tools the assistant ran, for the "it did not work" report (US3) and for spotting
+# soft failures. 8 entries, args/results clipped: it is memory, not a log.
+_tools: deque = deque(maxlen=8)
+
+
+def _recent_tools() -> list:
+    return list(_tools)
+
+
+def note_tool(name, args, result) -> None:
+    """Called by the tool dispatcher with every result. Remembers it in the ring and, when
+    the result reads like an error the action swallowed (research R1), records a ``soft``
+    failure. Runs on the caller's thread: a clipped copy and one anchored regex on the
+    first 300 characters, nothing else."""
+    try:
+        text = result if isinstance(result, str) else str(result)
+        soft = classify_soft_failure(text[:300])
+        clipped = ({k: (_cut(v, _MAX_TEXT) if isinstance(v, str) else v) for k, v in args.items()}
+                   if isinstance(args, dict) else args)
+        _tools.append({"ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+                       "name": str(name), "args": clipped, "result": _cut(text, _MAX_TEXT),
+                       "soft_failure": soft is not None})
+        if soft:
+            _enqueue_failure("soft", "tool", name, None, soft, _cut(text, _MAX_TEXT), None,
+                             {"args": clipped, "result": text}, "main.py:_execute_tool", None)
+    except Exception:
+        pass
+
+
+_notified: dict = {}
+_notified_lock = threading.Lock()
+
+
+def notify_once(key: str, message: str, every_s: float = 300) -> None:
+    """Say ``message`` on the on-screen log at most once per ``every_s`` seconds per ``key``.
+    Without a screen bound (tests, tools) it prints. Never raises."""
+    try:
+        now = time.monotonic()
+        with _notified_lock:
+            last = _notified.get(key)
+            if last is not None and now - last < every_s:
+                return
+            _notified[key] = now
+        if _notify is not None:
+            _notify(message)
+        else:
+            print(message)
+    except Exception:
+        pass
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -708,8 +1051,7 @@ _prev_thread_hook = None
 def _excepthook(tp, val, tb) -> None:
     try:
         if not issubclass(tp, KeyboardInterrupt):          # Ctrl+C is not a failure
-            _enqueue("failures", {"kind": "uncaught", "component": "app", "name": "main",
-                                  "exc": val})
+            _enqueue_failure("uncaught", "app", "main", val, None, "", None, None, None, None)
     except Exception:
         pass
     (_prev_excepthook or sys.__excepthook__)(tp, val, tb)
@@ -719,8 +1061,7 @@ def _thread_excepthook(args) -> None:
     try:
         if args.exc_type is not SystemExit and args.exc_value is not None:
             name = getattr(args.thread, "name", None) or "unknown"
-            _enqueue("failures", {"kind": "uncaught", "component": "thread", "name": name,
-                                  "exc": args.exc_value})
+            _enqueue_failure("uncaught", "thread", name, args.exc_value, None, "", None, None, None, None)
     except Exception:
         pass
     (_prev_thread_hook or threading.__excepthook__)(args)
@@ -781,7 +1122,7 @@ def setup(log_dir: Path = ROOT / "logs", *, tee_console: bool = True) -> None:
 
 
 def _shutdown_locked() -> None:
-    global _dir, _q, _thread, _dropped, _live_session, _notify, _transcript, _sec_mtime
+    global _dir, _q, _thread, _dropped, _live_session, _notify, _transcript, _sec_mtime, _live_attempts
     _uninstall_tee()
     _uninstall_hooks()
     _stop_writer()
@@ -792,6 +1133,11 @@ def _shutdown_locked() -> None:
             pass
     _handlers.clear()
     _warned.clear()
+    _held.clear()
+    _burst.__init__()
+    _tools.clear()
+    _notified.clear()
+    _live_attempts = 0
     _dir = _q = _thread = None
     _live_session = _notify = _transcript = None
     _sec_mtime = "unset"

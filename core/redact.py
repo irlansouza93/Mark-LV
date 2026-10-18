@@ -12,8 +12,8 @@ Three layers, applied in this order:
      (the Gemini key, plugin credentials), supplied by the caller;
   2. known shapes — Google ``AIza…``, ``sk-…`` (OpenAI / DeepSeek / Anthropic),
      Telegram bot tokens, ``Bearer …``, ``Authorization: …``, ``?key=`` style URL params;
-  3. dict keys by name — a *string* value under a key containing key/token/secret/
-     password/authorization/cookie is masked whole. Numbers and containers are left
+  3. dict keys by name — a *string* value under a key named key/api_key/apiKey (final or
+     isolated word) or containing token/secret/password/authorization/cookie is masked whole. Numbers and containers are left
      alone: the usage records have a ``tokens`` object that must stay readable.
 """
 from __future__ import annotations
@@ -28,7 +28,16 @@ _MIN_STUB = 12
 # A "secret" shorter than this (an empty string, "o") would mangle every log line.
 _MIN_SECRET = 6
 
-_SENSITIVE_KEY = re.compile(r"key|token|secret|password|authorization|cookie", re.I)
+# "key" is sensitive only as a final or isolated word (key, api_key, apiKey,
+# gemini_api_key, x-api-key, APIKEY). A plain substring match would also swallow
+# `keys: "ctrl+c"` from the keyboard action, `hotkey` and `monkey`, and triage needs
+# those readable. token/secret/password/authorization/cookie match anywhere.
+_SENSITIVE_KEY = re.compile(
+    r"(?i:token|secret|passw(?:or)?d|authorization|cookie)"
+    r"|(?i:(?:^|[^a-z0-9])key$)"          # key / api_key / x-api-key
+    r"|[a-z0-9]Key$"                      # apiKey (camelCase)
+    r"|(?i:api[_\-]?key)"                # apikey / APIKEY
+)
 
 # Compiled once at import: the writer thread calls redact for every record and every
 # console line.

@@ -70,6 +70,7 @@ import sys
 import time
 import threading
 from pathlib import Path
+from core import errlog
 
 if getattr(sys, "frozen", False):
     _BASE = Path(sys.executable).parent
@@ -486,11 +487,15 @@ def call(contents, tier: str = FAST, config=None,
     resolved_key = key or api_key()
     if not resolved_key:
         print("[Gemini] no Gemini API key is configured")
+        errlog.record_failure("gemini", "ladder", error_type="no_key", message="no Gemini API key is configured")
+        errlog.notify_once("nokey", "SYS: No Gemini API key is configured — side calls are off.", every_s=_COOLDOWN_SECONDS)
         return None
 
     cl = None
     tried = [m for m in ladder if not _cooling(m)] or list(ladder)
+    reasons = {}
     for model in tried:
+        t0 = time.monotonic()
         try:
             if model == LIVE:
                 reply = _live_call(contents, config, timeout_ms, resolved_key)
@@ -509,15 +514,23 @@ def call(contents, tier: str = FAST, config=None,
                 _cool(model)
                 print(f"[Gemini] {model}: out of quota — skipping it for "
                       f"{_COOLDOWN_SECONDS // 60} minutes")
+                reason = "quota"
             elif is_gone_error(msg):
                 _cool(model, _GONE_SECONDS)
                 print(f"[Gemini] {model}: unavailable to this key — set aside")
+                reason = "gone"
             elif is_unavailable_error(msg):
                 _cool(model, _UNAVAILABLE_SECONDS)
                 print(f"[Gemini] {model}: not answering — resting it for "
                       f"{_UNAVAILABLE_SECONDS // 60} minutes")
+                reason = "unavailable"
             else:
                 print(f"[Gemini] {model}: {type(e).__name__}: {msg[:140]}")
+                reason = "timeout" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timed out" in msg.lower() else "error"
+            reasons[model] = reason
+            errlog.record_failure("gemini", model, error_type=reason, message=msg, context={"tier": tier, "timeout_ms": timeout_ms, "latency_ms": int((time.monotonic() - t0) * 1000)})
+    errlog.record_failure("gemini", "ladder", error_type="ladder_exhausted", context={"tier": tier, "tried": list(tried), "reasons": reasons})
+    errlog.notify_once("ladder", errlog.ladder_message(reasons), every_s=_COOLDOWN_SECONDS)
     return None
 
 

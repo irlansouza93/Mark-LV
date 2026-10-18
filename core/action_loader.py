@@ -33,6 +33,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+from core import errlog
 
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
@@ -105,6 +106,7 @@ class ActionRegistry:
         except Exception as e:
             self._logger(f"Action '{name}' crashed during run(): {e}")
             traceback.print_exc()
+            errlog.record_failure("action", name, exc=e, phase="run", context={"args": parameters})
             return f"Tool '{name}' failed: {e}"
 
 
@@ -206,6 +208,7 @@ def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,
             rec = ActionRecord(name=path.stem, file=path.name,
                                error=f"Failed to load: {e}")
             traceback.print_exc()
+            errlog.record_failure("action", path.stem, exc=e, phase="load")
 
         all_records.append(rec)
         if rec.valid:

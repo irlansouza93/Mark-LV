@@ -1320,12 +1320,14 @@ class JarvisLive:
 
         except Exception as e:
             result = f"Tool '{name}' failed: {e}"
+            errlog.record_failure("inline_tool", name, exc=e, phase="run", context={"args": args})
             traceback.print_exc()
             self.speak_error(name, e)
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
+        errlog.note_tool(name, args, result)
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
 
         # A tool that declared itself NON_BLOCKING also says when its answer may
@@ -2315,6 +2317,7 @@ class JarvisLive:
                     self._interrupted          = False
 
                     print("[JARVIS] Connected.")
+                    errlog.new_live_session()
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
@@ -2377,6 +2380,12 @@ class JarvisLive:
                         self._resume_handle = None
                     self._conn_backoff = 0
                     continue
+
+                errlog.record_failure("live", "live_connect", exc=e, phase="resume" if _resumed_with else "connect",
+                                      context={"model": live_model, "voice": get_voice(), "resumed": _resumed_with,
+                                               "attempt": errlog.next_live_attempt(),
+                                               "backoff_s": getattr(self, "_conn_backoff", 3),
+                                               "classified": errlog.classify_live_error(str(e), _resumed_with)})
 
                 # A resumption handle the server will not accept — expired, or
                 # belonging to a session it has since dropped. Without this, the
