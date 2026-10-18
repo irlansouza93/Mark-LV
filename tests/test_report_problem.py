@@ -248,6 +248,15 @@ def test_tool_declaration_shape_and_size():
     assert len(declaration_text(tool)) <= 300                       # FR-018
 
 
+def test_the_description_tells_the_model_to_log_first_and_ask_when_unsure():
+    # T039 round 1: the model fixed the problem instead of writing it down. The wording is behaviour.
+    from actions import report_problem as mod
+    d = mod.TOOL["description"]
+    assert d.startswith("Call FIRST")
+    for phrase in ("não funcionou", "não deu certo", "deu errado", "then try to fix it", "ask before calling"):
+        assert phrase in d, phrase
+
+
 def test_the_action_loader_accepts_the_tool(tmp_path):
     adir = tmp_path / "actions"
     adir.mkdir()
@@ -276,3 +285,127 @@ def test_a_handler_failure_comes_back_as_text(monkeypatch):
     monkeypatch.setattr(errlog, "record_report", boom)
     out = handler()({"expected": "x"})
     assert out == "Could not log it: queue exploded"
+
+
+# ── the sentence that triggered the report is still being spoken (T039, round 1) ─────────
+from types import SimpleNamespace as NS
+
+from core import llm_usage
+
+
+def speech(user=None, assistant=None, tc=False, usage=None):
+    """A Live message as the receive loop sees it: transcription chunks ride in server_content."""
+    return NS(usage_metadata=usage, data=None,
+              server_content=NS(turn_complete=tc,
+                                input_transcription=NS(text=user) if user is not None else None,
+                                output_transcription=NS(text=assistant) if assistant is not None else None))
+
+
+def last_report(log_dir):
+    errlog.flush()
+    return read_lines(log_dir / "reports.jsonl")[-1]
+
+
+def test_report_contains_the_sentence_being_spoken_right_now(on):
+    errlog.bind(transcript=lambda: ["Jarvis: an old line"])
+    for chunk in ("Não", " funcionou.", " Eu queria", " abrir a câmera"):       # arrives in pieces
+        llm_usage.live_message(speech(user=chunk))
+    handler()({"expected": "abrir a câmera"})
+    rec = last_report(on)
+    assert rec["transcript"] == ["Jarvis: an old line", "User (now): Não funcionou. Eu queria abrir a câmera"]
+
+
+def test_assistant_draft_follows_the_user_line(on):
+    llm_usage.live_message(speech(user="A câmera não abriu."))
+    llm_usage.live_message(speech(assistant="Vou "))
+    llm_usage.live_message(speech(assistant="verificar isso"))
+    handler()({"expected": "câmera"})
+    assert last_report(on)["transcript"] == ["User (now): A câmera não abriu.", "Assistant (now): Vou verificar isso"]
+
+
+def test_only_the_last_six_lines_survive_and_now_lines_are_last(on):
+    errlog.bind(transcript=lambda: [f"line {i}" for i in range(8)])
+    llm_usage.live_message(speech(user="current user"))
+    llm_usage.live_message(speech(assistant="current draft"))
+    handler()({"expected": "x"})
+    assert last_report(on)["transcript"] == ["line 4", "line 5", "line 6", "line 7",
+                                              "User (now): current user", "Assistant (now): current draft"]
+
+
+def test_buffers_are_emptied_by_turn_complete(on):
+    errlog.bind(transcript=lambda: ["User: it is already in the session log"])
+    llm_usage.live_message(speech(user="half a sentence", assistant="half an answer"))
+    llm_usage.live_message(speech(tc=True))
+    handler()({"expected": "x"})
+    assert last_report(on)["transcript"] == ["User: it is already in the session log"]
+    llm_usage.live_message(speech(user="new turn"))
+    handler()({"expected": "y"})
+    assert last_report(on)["transcript"][-1] == "User (now): new turn"
+
+
+def test_a_message_that_both_speaks_and_completes_leaves_nothing_behind(on):
+    llm_usage.live_message(speech(user="last words", tc=True))
+    handler()({"expected": "x"})
+    assert last_report(on)["transcript"] == []
+
+
+def test_a_secret_in_the_current_speech_is_masked(on):
+    llm_usage.live_message(speech(user=f"my key is {SECRET} please note it"))
+    handler()({"expected": "x"})
+    errlog.flush()
+    raw = (on / "reports.jsonl").read_text(encoding="utf-8")
+    assert SECRET not in raw and "‹redacted" in raw and "please note it" in raw
+
+
+def test_current_speech_lines_are_cut_like_any_other(on):
+    llm_usage.live_message(speech(user="w" * 900))
+    handler()({"expected": "x"})
+    line = last_report(on)["transcript"][-1]
+    assert line.startswith("User (now): ") and line.endswith("…[+412 chars]")
+
+
+def test_runaway_speech_is_bounded_in_memory(on):
+    for _ in range(2000):
+        llm_usage.live_message(speech(user="blah " * 20, assistant="bleh " * 20))      # 400 KB of chunks
+    handler()({"expected": "x"})
+    user_line, draft_line = last_report(on)["transcript"]
+    assert user_line.startswith("User (now): ") and draft_line.startswith("Assistant (now): ")
+    assert sum(len(c) for c in errlog._turn_user) < 8000 and sum(len(c) for c in errlog._turn_assistant) < 8000
+
+
+def test_a_new_voice_session_forgets_the_old_turn(on):
+    llm_usage.live_message(speech(user="stale words from the previous connection"))
+    llm_usage.live_session_start("m", "Puck", False)
+    handler()({"expected": "x"})
+    assert last_report(on)["transcript"] == []
+
+
+def test_the_audio_path_only_concatenates_strings(on, monkeypatch):
+    calls = []
+    real = errlog._enqueue
+    monkeypatch.setattr(errlog, "_enqueue", lambda *a, **k: (calls.append(a), real(*a, **k))[1])
+    for chunk in ("a", "b", "c"):
+        llm_usage.live_message(speech(user=chunk, assistant=chunk))
+    assert calls == []                                              # no queue, no I/O, no cost math
+    assert errlog._turn_user == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize("bad", [None, "", "   ", 5])
+def test_speech_garbage_is_ignored(on, bad):
+    llm_usage.live_message(speech(user=bad, assistant=bad))
+    llm_usage.live_message(NS(usage_metadata=None, server_content=NS(turn_complete=False)))        # no transcription attrs at all
+    llm_usage.live_message(NS(usage_metadata=None, server_content=None))
+    handler()({"expected": "x"})
+    assert last_report(on)["transcript"] == []
+
+
+def test_the_receive_loop_cost_stays_tiny_with_transcription(on):
+    llm_usage.live_session_start("m", "Puck", False)
+    msg = speech(user="palavra ", assistant="resposta ")
+    samples = []
+    for i in range(4000):
+        t0 = time.perf_counter()
+        llm_usage.live_message(msg)
+        samples.append((time.perf_counter() - t0) * 1000)
+    samples.sort()
+    assert samples[int(len(samples) * 0.95)] < 0.2

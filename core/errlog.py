@@ -1127,6 +1127,62 @@ def _fin_report(rec: dict, ts: float) -> dict:
     return rec
 
 
+# The sentence being spoken RIGHT NOW. main.py only appends a turn to its session log at
+# turn_complete, but a report is made by a tool call in the middle of the turn — so the very
+# words that triggered it (measured in the first voice test of T039: both reports lacked the
+# user's last sentence) were not yet anywhere. llm_usage.live_message() sees every Live message
+# anyway and feeds the transcription chunks here; string appends only, bounded, no I/O.
+_TURN_CAP = 4000                                   # characters kept per side of the turn in progress
+_turn_user: list = []
+_turn_assistant: list = []
+_turn_chars = {"u": 0, "a": 0}
+
+
+def _push_chunk(buf: list, side: str, text) -> None:
+    if not isinstance(text, str):
+        return
+    t = text.strip()
+    if not t:
+        return
+    buf.append(t)
+    _turn_chars[side] += len(t) + 1
+    while _turn_chars[side] > _TURN_CAP and len(buf) > 1:          # runaway speech: forget the oldest chunks
+        _turn_chars[side] -= len(buf.pop(0)) + 1
+
+
+def note_speech(user=None, assistant=None) -> None:
+    """Add transcription chunks of the turn in progress (``input_transcription.text`` /
+    ``output_transcription.text``). Called from the audio receive loop: only appends. Never raises."""
+    try:
+        if user:
+            _push_chunk(_turn_user, "u", user)
+        if assistant:
+            _push_chunk(_turn_assistant, "a", assistant)
+    except Exception:
+        pass
+
+
+def end_turn() -> None:
+    """The turn is complete (main.py has logged it) or the voice session changed: drop the draft."""
+    try:
+        _turn_user.clear()
+        _turn_assistant.clear()
+        _turn_chars["u"] = _turn_chars["a"] = 0
+    except Exception:
+        pass
+
+
+def _turn_in_progress() -> list:
+    lines = []
+    said = " ".join(list(_turn_user)).strip()
+    drafted = " ".join(list(_turn_assistant)).strip()
+    if said:
+        lines.append(f"User (now): {said}")
+    if drafted:
+        lines.append(f"Assistant (now): {drafted}")
+    return lines
+
+
 def record_report(expected, happened=None) -> str | None:
     """Queue a user's "it did not work" report for logs/reports.jsonl, with the last lines of
     the conversation (the provider bound by ``bind(transcript=…)``), the last 8 tools run and
@@ -1144,6 +1200,7 @@ def record_report(expected, happened=None) -> str | None:
                 lines = [str(x) for x in list(got)[-_REPORT_TRANSCRIPT_LINES:]] if got else []
             except Exception:
                 lines = []
+        lines = (lines + _turn_in_progress())[-_REPORT_TRANSCRIPT_LINES:]    # + the sentence still being spoken
         said = str(expected).strip() if expected is not None else ""
         went_wrong = str(happened).strip() if happened is not None else ""
         return _enqueue("reports", {"kind": "report", "expected": said or "(not said)",
@@ -1375,6 +1432,7 @@ def _shutdown_locked() -> None:
     _recent_failures.clear()
     _burst.__init__()
     _tools.clear()
+    end_turn()
     _notified.clear()
     _live_attempts = 0
     _dir = _q = _thread = None

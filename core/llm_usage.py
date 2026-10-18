@@ -410,6 +410,7 @@ def _fin_session_start(rec: dict, ts: float) -> dict:
 
 def live_session_start(model: str, voice: str, resumed: bool) -> None:
     """A voice session connected (one record; ``resumed`` = it restored the conversation)."""
+    errlog.end_turn()                                   # a half-heard sentence of the old connection is not this one's
     try:
         errlog._enqueue("usage", {"kind": "live_session", "provider": "gemini", "event": "start",
                                   "_model": model, "voice": voice, "resumed": bool(resumed),
@@ -450,14 +451,25 @@ def _fin_live_msg(rec: dict, ts: float):
 
 
 def live_message(response) -> None:
-    """Called for EVERY message of the Live receive loop, on the audio thread. Reads two
-    attributes and, only when the message carries a ``usage_metadata`` or ends a turn,
-    queues a tiny dict (measured ~5 microseconds; nothing else happens here — the meter, the
-    price and the disk are the writer thread's). Never raises."""
+    """Called for EVERY message of the Live receive loop, on the audio thread. Reads a few
+    attributes, appends transcription text to the draft of the turn (errlog.note_speech) and,
+    only when the message carries a ``usage_metadata`` or ends a turn, queues a tiny dict
+    (measured ~1 microsecond; nothing else happens here — the meter, the price and the disk
+    are the writer thread's). Never raises."""
     try:
         um = getattr(response, "usage_metadata", None)
         sc = getattr(response, "server_content", None)
         tc = bool(getattr(sc, "turn_complete", False)) if sc is not None else False
+        if sc is not None:
+            # The words of the turn in progress, for a "that did not work" report made
+            # mid-turn (errlog.note_speech only appends to two bounded lists).
+            it, ot = getattr(sc, "input_transcription", None), getattr(sc, "output_transcription", None)
+            u = getattr(it, "text", None) if it is not None else None
+            a = getattr(ot, "text", None) if ot is not None else None
+            if u or a:
+                errlog.note_speech(u, a)
+            if tc:
+                errlog.end_turn()
         if um is None and not tc:
             return
         if os.environ.get("JARVIS_USAGE_RAW") == "1":
