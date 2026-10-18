@@ -80,6 +80,7 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
 from core                      import errlog
+from core                      import llm_usage
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
@@ -1659,6 +1660,7 @@ class JarvisLive:
         try:
             while True:
                 async for response in self.session.receive():
+                    llm_usage.live_message(response)
 
                     # ── Session resumption ───────────────────────────────────
                     # The server sends this periodically. `resumable` goes false
@@ -2279,6 +2281,7 @@ class JarvisLive:
 
         while True:
             try:
+                _end_reason = "shutdown"
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
                 # Pick the rung to open the conversation on. A model resting
@@ -2319,6 +2322,7 @@ class JarvisLive:
 
                     print("[JARVIS] Connected.")
                     errlog.new_live_session()
+                    llm_usage.live_session_start(live_model, get_voice(), _resumed_with)
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
@@ -2375,6 +2379,7 @@ class JarvisLive:
                 # session immediately with no backoff and no scary logs.
                 if _is_reconnect_signal(e):
                     print("[JARVIS] Voluntary reconnect requested.")
+                    _end_reason = "voluntary"
                     if not _keep_context_of(e):
                         # A deliberate clean slate (voice change) — drop the
                         # handle so the next connect really does start empty.
@@ -2382,6 +2387,7 @@ class JarvisLive:
                     self._conn_backoff = 0
                     continue
 
+                _end_reason = "error"
                 errlog.record_failure("live", "live_connect", exc=e, phase="resume" if _resumed_with else "connect",
                                       context={"model": live_model, "voice": get_voice(), "resumed": _resumed_with,
                                                "attempt": errlog.next_live_attempt(),
@@ -2483,6 +2489,7 @@ class JarvisLive:
                 else:
                     self._conn_backoff = 3
             finally:
+                llm_usage.live_session_end(_end_reason)
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
                 if len(self._session_log) >= 3:

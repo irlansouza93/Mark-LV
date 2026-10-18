@@ -1,0 +1,55 @@
+{
+  "v": 1,
+  "checked": "2026-10-17",
+  "source": [
+    "https://ai.google.dev/gemini-api/docs/pricing (Standard, Paid tier, read 2026-10-17)",
+    "docs/llm-gestao.md section 2 (DeepSeek and OpenAI, 2026-10-16)"
+  ],
+  "unit": "usd_per_1m_tokens",
+  "notes": [
+    "Edit this file to change a price; no code change needed. Cost is stored in each usage record when the call happens, so editing never rewrites history.",
+    "in/out: a number (all modalities) or an object by modality (text, audio, image; video counts as image). in_cached: price of cached input tokens. thinking tokens are billed as text output.",
+    "schedule: prices that replace the base ones from a date on (gemini-3.6-flash and the 3.8 TTS models double on 2027-01-01).",
+    "peak_multiplier: DeepSeek charges double 01-04h and 06-10h UTC.",
+    "Not on the Gemini page on 2026-10-17, so left out (cost shows as unknown and the model is listed in the report): gemini-3.5-flash, gemini-flash-latest, gemini-flash-lite-latest."
+  ],
+  "models": {
+    "gemini/gemini-2.5-flash-lite": {"in": {"text": 0.10, "audio": 0.30}, "in_cached": 0.01, "out": 0.40},
+    "gemini/gemini-3.5-flash-lite": {"in": 0.30, "in_cached": 0.03, "out": 2.50},
+    "gemini/gemini-3.1-flash-lite": {"in": {"text": 0.25, "audio": 0.50}, "in_cached": 0.025, "out": 1.50},
+    "gemini/gemini-2.5-flash": {"in": {"text": 0.30, "audio": 1.00}, "in_cached": 0.03, "out": 2.50},
+    "gemini/gemini-3-flash-preview": {"in": {"text": 0.50, "audio": 1.00}, "in_cached": 0.05, "out": 3.00},
+    "gemini/gemini-3.6-flash": {
+      "in": 0.75, "in_cached": 0.075, "out": 3.75,
+      "schedule": [{"from": "2027-01-01", "in": 1.50, "in_cached": 0.15, "out": 7.50}]
+    },
+    "gemini/gemini-3.1-flash-live-preview": {
+      "in": {"text": 0.75, "audio": 3.00, "image": 1.00},
+      "out": {"text": 4.50, "audio": 12.00}
+    },
+    "gemini/gemini-3.8-live": {
+      "in": {"text": 0.75, "audio": 3.00, "image": 1.00},
+      "out": {"text": 4.50, "audio": 12.00}
+    },
+    "gemini/gemini-2.5-flash-native-audio-preview-12-2025": {
+      "in": {"text": 0.50, "audio": 3.00, "image": 3.00},
+      "out": {"text": 2.00, "audio": 12.00}
+    },
+    "gemini/gemini-3.8-flash-lite-tts": {
+      "in": 0.50, "out": 6.00,
+      "schedule": [{"from": "2027-01-01", "in": 1.00, "out": 12.00}]
+    },
+    "gemini/gemini-3.8-flash-tts": {
+      "in": 0.50, "out": 9.00,
+      "schedule": [{"from": "2027-01-01", "in": 1.00, "out": 18.00}]
+    },
+    "gemini/gemini-3.1-flash-tts-preview": {"in": 1.00, "out": 20.00},
+    "gemini/gemini-2.5-flash-preview-tts": {"in": 0.50, "out": 10.00},
+    "gemini/gemini-embedding-2": {"in": 0.20, "out": 0.0},
+    "deepseek/deepseek-flash": {"in": 0.15, "in_cached": 0.003, "out": 0.60, "peak_multiplier": 2.0},
+    "deepseek/deepseek-v4-pro": {"in": 0.66, "out": 1.98, "peak_multiplier": 2.0},
+    "openai/gpt-5-nano": {"in": 0.05, "out": 0.40},
+    "openai/gpt-5-mini": {"in": 0.25, "out": 2.00},
+    "openai/text-embedding-3-small": {"in": 0.02, "out": 0.0}
+  }
+}

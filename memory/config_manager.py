@@ -240,6 +240,13 @@ def get_voice() -> str:
     return v if v in AVAILABLE_VOICES else DEFAULT_VOICE
 
 
+def get_llm_billing() -> str:
+    """Whether the Gemini key is on the free or the paid tier (``"free"`` | ``"paid"``).
+    Only used to label usage records; absent or invalid means free."""
+    v = load_api_keys().get("llm_billing", "free")
+    return v if v in ("free", "paid") else "free"
+
+
 def save_voice(voice_name: str) -> None:
     """Persist the chosen Live voice. Unknown names collapse to the default so a
     bad value can never reach the API and break the session."""

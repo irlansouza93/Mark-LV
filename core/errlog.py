@@ -39,6 +39,7 @@ import sys
 import threading
 import time
 import traceback
+import types
 import uuid
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -233,6 +234,20 @@ def _reset_zoneinfo(now_utc: datetime) -> datetime:
     loc = now_utc.astimezone(tz)
     nxt = datetime(loc.year, loc.month, loc.day, tzinfo=tz) + timedelta(days=1)
     return nxt.astimezone(_UTC)
+
+
+def pacific_day(now_utc: datetime) -> date:
+    """The Pacific-time calendar date of ``now_utc`` — the "quota day" of Google's free tier,
+    which rolls over at midnight there (4-5 a.m. in Brasilia). Same US DST rule as above."""
+    now = now_utc.astimezone(_UTC) if now_utc.tzinfo else now_utc.replace(tzinfo=_UTC)
+    best = None
+    for k in (-1, 0, 1):
+        d = now.date() + timedelta(days=k)
+        midnight = datetime(d.year, d.month, d.day, tzinfo=_UTC) + timedelta(
+            hours=7 if _pacific_is_dst_at_midnight(d) else 8)
+        if midnight <= now:
+            best = d
+    return best
 
 
 def quota_reset_local(now_utc: datetime, local_tz) -> datetime:
@@ -513,13 +528,15 @@ _CONFIG_PATH = ROOT / "config" / "api_keys.json"
 # are 25 MB failures + 3 MB reports + 12 MB console; usage files are monthly, never
 # rotated by size (~150 KB/day estimated).
 _LIMITS = {
+    "usage_raw": (5 * 1024 * 1024, 1),     # JARVIS_USAGE_RAW=1 diagnostics only (research R7)
     "failures": (5 * 1024 * 1024, 4),
     "reports": (1 * 1024 * 1024, 2),
     "jarvis": (2 * 1024 * 1024, 5),
     "usage": (0, 0),
 }
-_FILES = {"failures": "failures.jsonl", "reports": "reports.jsonl", "jarvis": "jarvis.log"}
-_STREAMS = ("failures", "reports", "usage")
+_FILES = {"failures": "failures.jsonl", "reports": "reports.jsonl", "jarvis": "jarvis.log",
+          "usage_raw": "usage-raw.jsonl"}
+_STREAMS = ("failures", "reports", "usage", "usage_raw")
 
 # A stuck disk must not grow memory without bound: past this many queued items new
 # records are dropped and the next one written says how many were lost.
@@ -751,6 +768,14 @@ def _normalize(obj, depth: int = 0):
         if len(items) > _MAX_ITEMS:
             out.append(f"…[+{len(items) - _MAX_ITEMS} items]")
         return out
+    dump = getattr(obj, "model_dump", None)           # google-genai (pydantic) objects, e.g. usage_metadata
+    if callable(dump):
+        try:
+            return _normalize(dump(mode="json", exclude_none=True), depth + 1)
+        except Exception:
+            pass
+    if isinstance(obj, types.SimpleNamespace):
+        return _normalize(vars(obj), depth + 1)
     try:
         return _clean_str(str(obj))
     except Exception:
@@ -845,6 +870,19 @@ def _write_record(stream: str, record: dict, ts: float, session, _summary: bool 
         _warn_once(f"stream:{stream}", f"[JARVIS] errlog: unknown log stream {stream!r}; record dropped.")
         return
     rec = dict(record)
+    # A record may carry a builder (``_finalize(rec, ts) -> dict | None``) so that the work of
+    # shaping it — token extraction, price lookup, session bookkeeping — runs HERE, on the
+    # writer thread, and not on the caller's (core/llm_usage.py uses this for every record).
+    # Returning None means "nothing to write".
+    fin = rec.pop("_finalize", None)
+    if fin is not None:
+        try:
+            rec = fin(rec, ts)
+        except Exception as e:
+            _warn_once("finalize", f"[JARVIS] errlog: building a record failed: {type(e).__name__}: {e}")
+            return
+        if not rec:
+            return
     exc = rec.pop("exc", None)
     if isinstance(exc, BaseException):
         _apply_exc(rec, exc)
