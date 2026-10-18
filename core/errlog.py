@@ -665,33 +665,38 @@ def _warn_write_failed(exc: BaseException | None) -> None:
 
 
 # ── Caller side: put a dict on the queue and go ──────────────────────────────
-def _enqueue(stream: str, record: dict, *, ts: float | None = None) -> None:
-    """Hand ``record`` to the writer thread. ``stream`` is ``failures``, ``reports`` or
-    ``usage`` (the monthly file is picked from the event time). Never raises, never
-    blocks: shallow copy + ``SimpleQueue.put`` (~µs). Before ``setup()`` it is a silent
-    no-op, so library code and tools may call it freely."""
+def _enqueue(stream: str, record: dict, *, ts: float | None = None) -> str | None:
+    """Hand ``record`` to the writer thread. ``stream`` is ``failures``, ``reports``,
+    ``usage`` (the monthly file is picked from the event time) or ``usage_raw``. Never
+    raises, never blocks: shallow copy + ``SimpleQueue.put`` (~µs). Before ``setup()`` it is
+    a silent no-op, so library code and tools may call it freely.
+
+    Returns None when the record was queued, else a short reason ("logging is not running",
+    "the log writer is not running", "the log queue is full") — which almost every caller
+    ignores and ``record_report`` hands to the user."""
     global _dropped
     try:
         q, t = _q, _thread
         if q is None:
-            return
+            return "logging is not running"
         if t is None or not t.is_alive():
             _warn_once("dead",
                        "[JARVIS] errlog: writer thread is not running; "
                        "failures and usage are not being recorded.",
                        "SYS: The log writer stopped — failures and usage are not being saved.")
-            return
+            return "the log writer is not running"
         if q.qsize() >= _MAX_QUEUE:
             with _dropped_lock:
                 _dropped += 1
-            return
+            return "the log queue is full"
         if not isinstance(record, dict):
             if record is None:
-                return
+                return None
             record = {"value": record}
         q.put(("rec", stream, dict(record), time.time() if ts is None else ts, _live_session))
-    except Exception:
-        pass
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
 
 
 def _enqueue_text(tag: str, line: str) -> None:
@@ -817,6 +822,8 @@ _FAILURE_ORDER = ("kind", "component", "name", "phase", "error_type", "message",
 
 # Burst limiter state (writer thread only): research R10 / spec SC-008.
 _burst = BurstLimiter()
+# The failures just written (writer thread only), for the "recent failures" of a user report.
+_recent_failures: deque = deque(maxlen=50)
 _held: dict = {}            # signature -> (prepared record, live session) of what was held back
 
 
@@ -887,10 +894,15 @@ def _write_record(stream: str, record: dict, ts: float, session, _summary: bool 
     if isinstance(exc, BaseException):
         _apply_exc(rec, exc)
     if stream == "failures":
+        rec.pop("transcript", None)                        # FR-017: only a user's report carries the conversation
         _prepare_failure(rec, exc)
         if not _summary and not _burst.allow(rec["signature"], ts):
             _held[rec["signature"]] = (rec, session)       # tallied; written as one summary per minute
             return
+        if not _summary:
+            _recent_failures.append((ts, {"ts": datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds"),
+                                          "signature": rec["signature"], "component": rec.get("component"),
+                                          "name": rec.get("name"), "error_type": rec.get("error_type")}))
     when = datetime.fromtimestamp(ts).astimezone()
     out = {"v": 1, "ts": when.isoformat(timespec="milliseconds"), "app": version(),
            "pid": os.getpid(), "live_session": session}
@@ -1074,6 +1086,9 @@ def _recent_tools() -> list:
     return list(_tools)
 
 
+_NO_SOFT_FAILURE = frozenset({"report_problem"})
+
+
 def note_tool(name, args, result) -> None:
     """Called by the tool dispatcher with every result. Remembers it in the ring and, when
     the result reads like an error the action swallowed (research R1), records a ``soft``
@@ -1081,7 +1096,9 @@ def note_tool(name, args, result) -> None:
     first 300 characters, nothing else."""
     try:
         text = result if isinstance(result, str) else str(result)
-        soft = classify_soft_failure(text[:300])
+        # report_problem answers "Could not log it: …" when it fails: an error report about the
+        # error report would be noise, so that tool is never judged as a soft failure.
+        soft = None if str(name) in _NO_SOFT_FAILURE else classify_soft_failure(text[:300])
         clipped = ({k: (_cut(v, _MAX_TEXT) if isinstance(v, str) else v) for k, v in args.items()}
                    if isinstance(args, dict) else args)
         _tools.append({"ts": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1092,6 +1109,48 @@ def note_tool(name, args, result) -> None:
                              {"args": clipped, "result": text}, "main.py:_execute_tool", None)
     except Exception:
         pass
+
+
+# ── User reports: "that did not work" (US3) ──────────────────────────────────
+_REPORT_WINDOW_S = 600          # failures of the last 10 minutes go with the report
+_REPORT_MAX_FAILURES = 20
+_REPORT_TRANSCRIPT_LINES = 6    # the last ~3 exchanges
+
+
+def _fin_report(rec: dict, ts: float) -> dict:
+    """Writer thread: attach the recent failures. It runs after every record queued before
+    the report, so a failure that happened a moment ago is already in the ring."""
+    now = _clock()
+    recent = [info for t, info in sorted(_recent_failures, key=lambda e: e[0])
+              if now - _REPORT_WINDOW_S <= t <= now + 5][-_REPORT_MAX_FAILURES:]
+    rec["recent_failures"] = recent
+    return rec
+
+
+def record_report(expected, happened=None) -> str | None:
+    """Queue a user's "it did not work" report for logs/reports.jsonl, with the last lines of
+    the conversation (the provider bound by ``bind(transcript=…)``), the last 8 tools run and
+    the failures of the last 10 minutes. Only this path ever stores the conversation.
+
+    Instant: copies a few small lists and puts one dict on the queue; the failures, the
+    secret filter and the disk are the writer's. Returns None when queued, or a short reason
+    when it could not be (never raises)."""
+    try:
+        lines: list = []
+        provider = _transcript
+        if provider is not None:
+            try:
+                got = provider()
+                lines = [str(x) for x in list(got)[-_REPORT_TRANSCRIPT_LINES:]] if got else []
+            except Exception:
+                lines = []
+        said = str(expected).strip() if expected is not None else ""
+        went_wrong = str(happened).strip() if happened is not None else ""
+        return _enqueue("reports", {"kind": "report", "expected": said or "(not said)",
+                                    "happened": went_wrong or None, "transcript": lines,
+                                    "recent_tools": _recent_tools(), "_finalize": _fin_report})
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
 
 
 _notified: dict = {}
@@ -1313,6 +1372,7 @@ def _shutdown_locked() -> None:
     _handlers.clear()
     _warned.clear()
     _held.clear()
+    _recent_failures.clear()
     _burst.__init__()
     _tools.clear()
     _notified.clear()

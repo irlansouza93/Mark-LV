@@ -122,15 +122,16 @@ def test_free_text_is_truncated_with_a_counter(log_dir, cfg):
         "message": "m" * 600,
         "context": {"result": "r" * 501, "ok": "short"},
         "traceback": "t" * 9000,
-        "transcript": ["u" * 700],
     })
+    errlog._enqueue("reports", {"kind": "report", "transcript": ["u" * 700]})   # only reports carry a transcript
     errlog.flush()
     (rec,) = read_lines(log_dir / "failures.jsonl")
     assert rec["message"] == "m" * 500 + "…[+100 chars]"
     assert rec["context"]["result"] == "r" * 500 + "…[+1 chars]"
     assert rec["context"]["ok"] == "short"
     assert rec["traceback"] == "t" * 8000 + "…[+1000 chars]"
-    assert rec["transcript"] == ["u" * 500 + "…[+200 chars]"]
+    (rep,) = read_lines(log_dir / "reports.jsonl")
+    assert rep["transcript"] == ["u" * 500 + "…[+200 chars]"]
 
 
 def test_secret_is_masked_before_truncation(log_dir, cfg):

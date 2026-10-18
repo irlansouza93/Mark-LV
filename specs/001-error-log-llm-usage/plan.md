@@ -69,9 +69,9 @@ continua ✅ — o desenho não acrescentou dependência nem arquivo do upstream
 
 | Ferramenta | Texto da declaração (nome + descrições + parâmetros) | JSON serializado |
 |---|---|---|
-| `report_problem` | 179 caracteres (medido em 2026-10-16) | 353 caracteres |
+| `report_problem` | 179 caracteres (medido em 2026-10-16; remedido em 2026-10-17 sobre o `TOOL` implementado: igual) | 353 caracteres compactos (372 com espaços do `json.dumps` padrão) |
 
-Nenhuma regra nova no prompt do sistema (clarify Q5). Remedir na implementação se o texto mudar.
+Nenhuma regra nova no prompt do sistema (clarify Q5). Medida: nome + descrições + nomes de parâmetros somados; o texto do contrato ficou dentro de 300, sem precisar encurtar.
 
 ## Project Structure
 
