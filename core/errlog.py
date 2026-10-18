@@ -25,6 +25,7 @@ I/O of their own beyond what their docstring says, so tests run them directly.
 """
 from __future__ import annotations
 
+import asyncio
 import atexit
 import hashlib
 import json
@@ -33,6 +34,7 @@ import math
 import os
 import queue
 import re
+import socket
 import sys
 import threading
 import time
@@ -286,27 +288,55 @@ def innermost_project_frame(tb, root: Path = ROOT):
 # ── Soft failures (research R1) ──────────────────────────────────────────────
 # Most actions catch their own exceptions and return a sentence ("Could not save: …").
 # Those never reach a loader, so the tool dispatcher shows each result to this
-# classifier. It is conservative on purpose: the result must START like an error, so a
-# normal sentence that happens to contain the word "error" is not a failure.
-_SOFT_START = re.compile(r"^(?:could not|couldn't|unable to|error\b)", re.I)
-_SOFT_LABELLED = re.compile(r"^(?:\S+\s+){0,3}(?:failed|error):", re.I)       # "Click failed: …"
+# classifier. It is conservative on purpose: the result must START like an error (or
+# carry the error word within its first few words), so a normal sentence that happens to
+# contain the word "error" is not a failure.
+#
+# Calibrated on the ~250 error strings the actions in actions/ really return (T020a):
+#   "Access denied: …" "Permission denied: …"            file_controller, file_processor
+#   "File not found: …" "Command not found: …"            file_controller, code_helper, video
+#   "Convert failed: …" "Scheduling failed: …"            "<what> failed:" in 30+ actions
+#   "Click error: …" "File controller error (copy): …"    "<what> error:" (computer_control…)
+#   "Flight search failed, sir: …"                        the butler register of flight/youtube/summary
+#   "pandas not installed. Run: …"                        missing optional dependency
+#   "Unsupported format: …" "Unknown PDF action: …"       bad request that reached the handler
+#   "Timed out after 30s." "Sir, I couldn't find …"       timeouts and first-person failures
+# NOT failures: "No results found for…", "No files found.", "Desktop is empty.", "Not found
+# in monitored topics: …" (an empty answer is an answer), and "Please specify…"/"No file
+# path provided." (the model called the tool badly — a prompt problem, left to a later pass).
+_SOFT_START = re.compile(
+    r"^(?:could\s+not\b|couldn't|unable\s+to\b|failed\s+to\b|cannot\b|can't|error\b"
+    r"|access\s+denied|permission\s+denied|unsupported\b|unknown\s+\S|invalid\b|no\s+such\s+file"
+    r"|something\s+went\s+wrong|protected\s+directory"
+    r"|(?:sir,\s*)?i\s+(?:couldn't|could\s+not|can't|cannot|am\s+unable|was\s+unable)\b)", re.I)
+# "<up to 3 words> failed:" / "error:" — also "error (copy):" and "failed, sir:".
+_SOFT_LABELLED = re.compile(r"^(?!(?:the|a|an|this|that|these|there|it|no|in|to|of)\b)(?:\S+\s+){0,3}(?:failed|error)(?:\s*\([^)]*\))?(?:,\s*sir)?:", re.I)
+# "<subject> not installed|not found|timed out|not supported" within the first words.
+_SOFT_PHRASE = re.compile(
+    r"^(?:\S+\s+){0,3}(?:(?:is\s+)?not\s+(?:installed|available)\b|not\s+a\s+(?:file|directory)\b"
+    r"|not\s+found(?:\s*[:.(]|\s+on\s+screen)|timed\s+out\b)"
+    r"|^(?:\S+\s+){0,4}not\s+supported\b", re.I)
 # Results the loaders already recorded as a crash: counting them again would double them.
 _SOFT_ALREADY = re.compile(r"^(?:tool '[^']*' failed\b|sir, the '[^']*' plugin failed\b)", re.I)
-_QUOTED = re.compile(r"""(['"]).*?\1""")
+_QUOTED = re.compile(r"""(?<![A-Za-z])(['"]).*?\1""")
+_PARENS = re.compile(r"\([^)]*\)")
 
 
 def classify_soft_failure(result) -> str | None:
     """``"soft:could not save"`` when ``result`` reads like a swallowed error, else None.
     The label is the first three plain words before any colon, lower-cased, with quoted
-    text, paths and numbers dropped — so the same failure on different files groups together."""
+    text, parentheses, paths and numbers dropped — so the same failure on different files
+    groups together."""
     text = result.strip() if isinstance(result, str) else ""
     if not text or _SOFT_ALREADY.match(text):
         return None
-    if not (_SOFT_START.match(text) or _SOFT_LABELLED.match(text)):
+    if not (_SOFT_START.match(text) or _SOFT_LABELLED.match(text) or _SOFT_PHRASE.match(text)):
         return None
-    head = _QUOTED.sub(" ", text.split(":", 1)[0].lower())
+    head = _PARENS.sub(" ", _QUOTED.sub(" ", text.split(":", 1)[0].lower()))
     head = " ".join(tok for tok in head.split() if "/" not in tok and "\\" not in tok)
-    words = re.findall(r"[a-z]+", head)
+    words = re.findall(r"[a-z']+", head)
+    if words and words[0] == "sir":                      # "Sir, I couldn't…" is the same failure as "I couldn't…"
+        words = words[1:]
     return "soft:" + (" ".join(words[:3]) or "unknown")
 
 
@@ -348,21 +378,77 @@ def group(records) -> list:
     return out
 
 
+# ── Exceptions: flattening groups and chains ─────────────────────────────────
+def _exception_leaves(exc, out: list, depth: int = 0) -> list:
+    """The non-group exceptions inside ``exc`` (a TaskGroup wraps the real cause in an
+    ExceptionGroup, sometimes nested)."""
+    if isinstance(exc, BaseExceptionGroup) and depth < 8:
+        for sub in exc.exceptions:
+            _exception_leaves(sub, out, depth + 1)
+    else:
+        out.append(exc)
+    return out
+
+
+def _primary_exception(exc):
+    """The leaf worth reporting: the first that is not a CancelledError (cancellation is
+    the group tearing its other tasks down, never the cause). ``exc`` itself when it is
+    not a group."""
+    leaves = _exception_leaves(exc, [])
+    for leaf in leaves:
+        if not isinstance(leaf, asyncio.CancelledError):
+            return leaf
+    return leaves[0] if leaves else exc
+
+
+def _chain_text(exc, limit: int = 50) -> str:
+    """``Type: message`` of an exception and of everything it wraps — group members,
+    ``__cause__`` and ``__context__`` — for matching by cue. Cycle-safe and bounded."""
+    seen: set = set()
+    parts: list = []
+    todo = [exc]
+    while todo and len(parts) < limit:
+        e = todo.pop(0)
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        try:
+            parts.append(f"{type(e).__name__}: {e}")
+        except Exception:
+            parts.append(type(e).__name__)
+        if isinstance(e, BaseExceptionGroup):
+            todo.extend(e.exceptions)
+        todo.append(e.__cause__)
+        todo.append(e.__context__)
+    return "\n".join(parts)
+
+
 # ── Voice connection errors (the cues main.py's connection loop already uses) ─
+# Plus what a real Wi-Fi drop looks like (2026-10-17): websockets' ConnectionClosedError,
+# genai's "1006 … abnormal closure" and Windows' ConnectionResetError [WinError 64].
 _NET_CUES = ("TimeoutError", "timed out", "getaddrinfo", "CancelledError",
-             "ConnectionRefusedError", "OSError", "Cannot connect")
+             "ConnectionRefusedError", "OSError", "Cannot connect",
+             "ConnectionClosed", "ConnectionReset", "ConnectionAbort", "abnormal closure",
+             "WinError 64", "Network is unreachable")
+# Whole words: "unhandled errors in a TaskGroup" (every TaskGroup failure) must not read as a handle.
+_HANDLE_WORD = re.compile(r"\b(?:resum\w*|handle)\b")
 _CONFIG_CUES = ("INVALID_ARGUMENT", "Unknown name", "unexpected keyword")
 
 
-def classify_live_error(err_str: str, resumed: bool = False) -> str:
+def classify_live_error(err, resumed: bool = False) -> str:
     """``quota | handle | net | key | config | other`` for a failed Live connection.
 
-    Same order of reasons as the loop in main.py. ``handle`` needs ``resumed``: only a
-    session opened with a resumption handle can have a rejected handle. A bad key is
-    checked before the generic INVALID_ARGUMENT because Google reports it as one."""
-    s = err_str or ""
+    ``err`` is the exception (preferred: its group members, ``__cause__`` and ``__context__``
+    are all read — a dropped Wi-Fi arrives as an ExceptionGroup whose own text says nothing)
+    or just its text. Same order of reasons as the loop in main.py. ``handle`` needs
+    ``resumed``: only a session opened with a resumption handle can have a rejected handle.
+    A bad key is checked before the generic INVALID_ARGUMENT because Google reports it as one."""
+    if isinstance(err, BaseException):
+        s = _chain_text(err)
+    else:
+        s = str(err or "")
     low = s.lower()
-    if resumed and ("resum" in low or "handle" in low or "INVALID_ARGUMENT" in s or "NOT_FOUND" in s):
+    if resumed and (_HANDLE_WORD.search(low) or "INVALID_ARGUMENT" in s or "NOT_FOUND" in s):
         return "handle"
     if "429" in s or "RESOURCE_EXHAUSTED" in s:
         return "quota"
@@ -377,9 +463,37 @@ def classify_live_error(err_str: str, resumed: bool = False) -> str:
     return "other"
 
 
+_NET_TYPES = ("ConnectError", "ConnectionError", "gaierror")
+_NET_TEXT = ("getaddrinfo", "nodename nor servname", "name or service not known",
+             "network is unreachable", "no route to host", "cannot connect")
+
+
+def rung_failure_reason(exc, msg: str = "") -> str:
+    """Why a Gemini ladder rung failed when it was not quota, gone or unavailable:
+    ``network`` (no route / DNS — every rung will fail the same way), ``timeout`` or ``error``."""
+    text = (msg or "").lower()
+    seen: set = set()
+    todo = [exc]
+    while todo and len(seen) < 20:
+        e = todo.pop(0)
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, (ConnectionError, socket.gaierror)) or type(e).__name__ in _NET_TYPES:
+            return "network"
+        todo.extend((e.__cause__, e.__context__))
+    if any(c in text for c in _NET_TEXT):
+        return "network"
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timed out" in text:
+        return "timeout"
+    return "error"
+
+
 def ladder_message(reasons: dict, now: datetime | None = None) -> str:
     """The one on-screen line for an exhausted Gemini ladder (research R12)."""
     n = len(reasons)
+    if n and all(v == "network" for v in reasons.values()):
+        return "SYS: Gemini unreachable — check the connection."
     quota = sum(1 for v in reasons.values() if v == "quota")
     if n and quota * 2 > n:
         back = quota_reset_local(now or datetime.now(_UTC), None)
@@ -684,27 +798,33 @@ _held: dict = {}            # signature -> (prepared record, live session) of wh
 def _apply_exc(rec: dict, exc) -> None:
     """Fill traceback / error_type / message from an exception object — on the writer
     thread, because formatting a traceback costs 0.1-1 ms and the caller may be the
-    audio loop."""
+    audio loop. The traceback is always the full one (for a group: every member); type
+    and message come from the primary leaf, so two different causes wrapped in the same
+    ``ExceptionGroup`` do not collapse into one signature."""
     try:
         rec.setdefault("traceback", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     except Exception:
         rec.setdefault("traceback", f"{type(exc).__name__} (traceback unavailable)")
-    rec.setdefault("error_type", type(exc).__name__)
+    leaf = _primary_exception(exc)
+    rec.setdefault("error_type", type(leaf).__name__)
     if not rec.get("message"):
         try:
-            rec["message"] = str(exc)
+            rec["message"] = str(leaf)
         except Exception:
-            rec["message"] = f"<{type(exc).__name__}: str() failed>"
+            rec["message"] = f"<{type(leaf).__name__}: str() failed>"
 
 
 def _prepare_failure(rec: dict, exc) -> None:
     """Origin and signature of a failure (research R5). The origin is the innermost
-    project frame of the exception; failing that, the line of ours that reported it
-    (``_caller``, captured by ``record_failure``); failing that, ``component:name``."""
+    project frame of the exception (of its primary leaf when it is a group); failing that,
+    the line of ours that reported it (``_caller``, captured by ``record_failure``);
+    failing that, ``component:name``."""
     caller = rec.pop("_caller", None)
     frame = None
     if isinstance(exc, BaseException):
-        frame = innermost_project_frame(exc.__traceback__, ROOT)
+        leaf = _primary_exception(exc)
+        frame = (innermost_project_frame(leaf.__traceback__, ROOT)
+                 or innermost_project_frame(exc.__traceback__, ROOT))
     if not rec.get("origin"):
         if frame is not None:
             rec["origin"], rec["origin_line"] = frame
@@ -1065,6 +1185,27 @@ def _thread_excepthook(args) -> None:
     except Exception:
         pass
     (_prev_thread_hook or threading.__excepthook__)(args)
+
+
+def asyncio_exception_handler(loop, context) -> None:
+    """Loop exception handler: records what asyncio would only print to the console — a
+    ``QueueFull`` in a callback during a reconnection, a task destroyed while pending —
+    as ``kind: "uncaught"`` / ``component: "app"``, then lets asyncio's default handler
+    print it as before. Never raises."""
+    try:
+        ctx = context if isinstance(context, dict) else {}
+        exc = ctx.get("exception")
+        message = str(ctx.get("message") or "")
+        is_exc = isinstance(exc, BaseException)
+        _enqueue_failure("uncaught", "app", "asyncio", exc if is_exc else None,
+                         None if is_exc else "asyncio", message, None,
+                         {"message": message}, None, None)
+    except Exception:
+        pass
+    try:
+        loop.default_exception_handler(context)
+    except Exception:
+        pass
 
 
 def _install_hooks() -> None:

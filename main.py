@@ -2254,6 +2254,7 @@ class JarvisLive:
         )
         set_trim_notifier(self.ui.write_log)
         errlog.bind(notify=self.ui.write_log, transcript=lambda: list(self._session_log[-6:]))
+        asyncio.get_running_loop().set_exception_handler(errlog.asyncio_exception_handler)
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
@@ -2385,7 +2386,7 @@ class JarvisLive:
                                       context={"model": live_model, "voice": get_voice(), "resumed": _resumed_with,
                                                "attempt": errlog.next_live_attempt(),
                                                "backoff_s": getattr(self, "_conn_backoff", 3),
-                                               "classified": errlog.classify_live_error(str(e), _resumed_with)})
+                                               "classified": errlog.classify_live_error(e, _resumed_with)})
 
                 # A resumption handle the server will not accept — expired, or
                 # belonging to a session it has since dropped. Without this, the

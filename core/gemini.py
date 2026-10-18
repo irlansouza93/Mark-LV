@@ -526,7 +526,7 @@ def call(contents, tier: str = FAST, config=None,
                 reason = "unavailable"
             else:
                 print(f"[Gemini] {model}: {type(e).__name__}: {msg[:140]}")
-                reason = "timeout" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timed out" in msg.lower() else "error"
+                reason = errlog.rung_failure_reason(e, msg)
             reasons[model] = reason
             errlog.record_failure("gemini", model, error_type=reason, message=msg, context={"tier": tier, "timeout_ms": timeout_ms, "latency_ms": int((time.monotonic() - t0) * 1000)})
     errlog.record_failure("gemini", "ladder", error_type="ladder_exhausted", context={"tier": tier, "tried": list(tried), "reasons": reasons})
