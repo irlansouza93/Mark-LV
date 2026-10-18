@@ -115,6 +115,21 @@ Até lá o medidor (`LiveUsageMeter`) guarda a **última** `usage_metadata` vist
 `turn_complete` e emite um registro por turno; se a medição mostrar contagem acumulada, o medidor
 passa a emitir a diferença — a regra fica num ponto só e coberta por teste com mensagens falsas.
 
+**Medido (T032, 2026-10-17, `gemini-3.1-flash-live-preview`, 7 turnos de voz, `JARVIS_USAGE_RAW=1`):**
+- Chega **1 `usage_metadata` por turno**, na **mesma mensagem** do `turn_complete`.
+- Os valores são **do turno, não acumulados**: `prompt_token_count` foi 20152 → 21510 → 22038 →
+  11348 → 11404 → 11919 → 24399 (cai e sobe, porque é o contexto daquele turno); a resposta foi
+  414, 134, 17, —, 323, 166, 118.
+- O prompt de cada turno tem ~16,4–17,1 mil tokens de **texto** (prompt do sistema + declarações das
+  ferramentas, recontados a cada turno — a suposição da `llm-gestao.md` está certa), mais **áudio**
+  (586–3030) e, às vezes, **imagem** (264/528).
+- Custo no pago: US$ 0,009–0,024 por turno.
+- **Regra confirmada:** "a última `usage_metadata` antes do `turn_complete`, um registro por turno".
+  Somar os registros por turno dá o que seria cobrado; o medidor **não** precisa subtrair o
+  snapshot anterior.
+- Consequência para a decisão de custo (D10/D12): o grosso do custo de uma conversa curta é o
+  contexto fixo reenviado a cada turno (~17 mil tokens de texto), não a fala do usuário.
+
 Chamadas avulsas pelo degrau `LIVE` (`_live_turn`, sessão descartável): o `drain()` passa a
 guardar a `usage_metadata` das mensagens e o `_Reply` a carrega; o registro sai como
 `kind: "oneshot"`, modelo = o modelo Live usado.

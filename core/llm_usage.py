@@ -308,12 +308,18 @@ def result_of(err) -> str:
 class LiveUsageMeter:
     """Turns the ``usage_metadata`` messages of a Live session into one ``tokens`` dict per turn.
 
-    PROVISIONAL RULE (research R7): the LAST ``usage_metadata`` seen before a turn's
-    ``turn_complete`` is that turn's usage. Task T032 measures, with the real service
-    (``JARVIS_USAGE_RAW=1`` writes every raw message to logs/usage-raw.jsonl), whether
-    Live reports the turn's own usage or a running total for the session. If it is a
-    running total, change :meth:`_turn_tokens` — and only that — to subtract the previous
-    snapshot; the tests in tests/test_llm_usage.py pin the rule being used.
+    THE RULE (research R7, measured 2026-10-17 with gemini-3.1-flash-live-preview over 7
+    real voice turns): the LAST ``usage_metadata`` seen before a turn's ``turn_complete`` is
+    that turn's usage, one record per turn. Why it is right and not "accumulated":
+      * Live sends ONE ``usage_metadata`` per turn, in the same message as ``turn_complete``;
+      * its values are the turn's own — ``prompt_token_count`` went 20152, 21510, 22038,
+        11348, 11404, 11919, 24399: a running total could never fall from 22038 to 11348;
+      * so summing the per-turn records gives what Google bills, with no subtraction.
+    A turn's prompt is ~16.4-17.1k tokens of TEXT (system prompt + tool declarations, resent
+    every turn) plus the audio (586-3030) and sometimes an image (264/528); at paid prices
+    that is US$ 0.009-0.024 per turn. If a future model switches to running totals, change
+    :meth:`_turn_tokens` — and only it — to subtract the previous snapshot;
+    ``JARVIS_USAGE_RAW=1`` writes every raw message to logs/usage-raw.jsonl to check again.
     """
 
     def __init__(self):
@@ -481,7 +487,8 @@ def _num(v) -> float | None:
 def _new_row(day, provider, model) -> dict:
     return {"day": day, "provider": provider, "model": model, "calls": 0, "ok": 0, "quota_errors": 0,
             "quota_hours": set(), "quota_days": set(), "tokens": dict.fromkeys(TOKEN_FIELDS, 0),
-            "calls_with_tokens": 0, "voice_minutes": 0.0, "cost_usd_if_paid": 0.0,
+            "calls_with_tokens": 0, "voice_minutes": 0.0, "voice_minutes_estimated": 0.0,
+            "sessions_without_end": 0, "cost_usd_if_paid": 0.0,
             "cost_usd_actual": 0.0, "cost_unknown_calls": 0}
 
 
@@ -498,6 +505,7 @@ def summarize(records, tz) -> dict:
     quota_events: list = []
     no_price: dict = {}
     billings: set = set()
+    sessions: dict = {}                  # live_session id -> start/last-seen/ended, see "sessions without an end"
     skipped = 0
     for r in records:
         if not isinstance(r, dict):
@@ -509,6 +517,14 @@ def summarize(records, tz) -> dict:
             skipped += 1
             continue
         provider, model = r.get("provider") or "?", r.get("model") or "?"
+        sid = r.get("live_session")
+        if sid:
+            s = sessions.setdefault(sid, {"start": None, "ended": False, "last": dt, "provider": provider, "model": model})
+            s["last"] = max(s["last"], dt)
+            if kind == "live_session" and r.get("event") == "start":
+                s["start"], s["provider"], s["model"] = dt, provider, model
+            elif kind == "live_session" and r.get("event") == "end":
+                s["ended"] = True
         if kind == "live_session":
             if r.get("event") == "end":
                 row = rows.setdefault((dt.date().isoformat(), provider, model),
@@ -545,13 +561,29 @@ def summarize(records, tz) -> dict:
         if r.get("price_missing"):
             no_price[model] = no_price.get(model, 0) + 1
 
+    # Sessions without an end. The app can be closed in ways that skip every cleanup
+    # (shutdown_jarvis calls os._exit(0); Ctrl-C can too), so a session may have a "start" and
+    # never an "end" — measured 2026-10-17: the report said "voz: 0 min" for a 3.5-minute
+    # conversation. Its length is estimated as (last record of that session) - (start) and
+    # flagged, so the number is useful and honest. A session with no other record counts 0.
+    for s in sessions.values():
+        if s["start"] is None or s["ended"]:
+            continue
+        minutes = max(0.0, (s["last"] - s["start"]).total_seconds()) / 60.0
+        day = s["last"].date().isoformat()
+        row = rows.setdefault((day, s["provider"], s["model"]), _new_row(day, s["provider"], s["model"]))
+        row["voice_minutes"] += minutes
+        row["voice_minutes_estimated"] += minutes
+        row["sessions_without_end"] += 1
+
     out_rows = []
     totals = {"calls": 0, "ok": 0, "quota_errors": 0, "calls_with_tokens": 0, "voice_minutes": 0.0,
-              "cost_usd_if_paid": 0.0, "cost_usd_actual": 0.0, "cost_unknown_calls": 0,
+              "voice_minutes_estimated": 0.0, "sessions_without_end": 0, "cost_usd_if_paid": 0.0, "cost_usd_actual": 0.0, "cost_unknown_calls": 0,
               "tokens": dict.fromkeys(TOKEN_FIELDS, 0)}
     for key in sorted(rows):
         row = rows[key]
         for k in ("calls", "ok", "quota_errors", "calls_with_tokens", "voice_minutes",
+                  "voice_minutes_estimated", "sessions_without_end",
                   "cost_usd_if_paid", "cost_usd_actual", "cost_unknown_calls"):
             totals[k] += row[k]
         for k in TOKEN_FIELDS:
@@ -559,10 +591,12 @@ def summarize(records, tz) -> dict:
         row["quota_hours"] = sorted(row["quota_hours"])
         row["quota_days"] = sorted(row["quota_days"])
         row["voice_minutes"] = round(row["voice_minutes"], 2)
+        row["voice_minutes_estimated"] = round(row["voice_minutes_estimated"], 2)
         row["cost_usd_if_paid"] = round(row["cost_usd_if_paid"], 6)
         row["cost_usd_actual"] = round(row["cost_usd_actual"], 6)
         out_rows.append(row)
     totals["voice_minutes"] = round(totals["voice_minutes"], 2)
+    totals["voice_minutes_estimated"] = round(totals["voice_minutes_estimated"], 2)
     totals["cost_usd_if_paid"] = round(totals["cost_usd_if_paid"], 6)
     totals["cost_usd_actual"] = round(totals["cost_usd_actual"], 6)
     totals["billing"] = sorted(billings)

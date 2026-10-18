@@ -84,6 +84,7 @@ def _merge(rows, key_fn):
             m = merged[key_fn(r)] = {**r, "tokens": dict(r["tokens"]), "quota_hours": [], "quota_days": []}
             continue
         for k in ("calls", "ok", "quota_errors", "calls_with_tokens", "voice_minutes",
+                  "voice_minutes_estimated", "sessions_without_end",
                   "cost_usd_if_paid", "cost_usd_actual", "cost_unknown_calls"):
             m[k] += r[k]
         for k in r["tokens"]:
@@ -149,8 +150,14 @@ def _report(summary: dict, start: date, end: date, days: int, checked, corrupt: 
                f"(real: US$ {t['cost_usd_actual']:.2f}, {level})")
     if t["calls"]:
         pct = 100.0 * t["calls_with_tokens"] / t["calls"]
-        out.append(f"Chamadas com contagem de tokens: {t['calls_with_tokens']} de {t['calls']} ({pct:.0f}%); "
-                   f"voz: {t['voice_minutes']:.0f} min")
+        voice = f"voz: {t['voice_minutes']:.0f} min"
+        if t["sessions_without_end"]:
+            n = t["sessions_without_end"]
+            voice += (f" (inclui {t['voice_minutes_estimated']:.0f} min estimados de {n} "
+                      f"sessão sem fim registrado)" if n == 1 else
+                      f" (inclui {t['voice_minutes_estimated']:.0f} min estimados de {n} "
+                      f"sessões sem fim registrado)")
+        out.append(f"Chamadas com contagem de tokens: {t['calls_with_tokens']} de {t['calls']} ({pct:.0f}%); {voice}")
     if t["cost_unknown_calls"]:
         out.append(f"* custo desconhecido em {t['cost_unknown_calls']} chamada(s) (sem preço ou sem contagem de tokens)")
     if summary["models_without_price"]:

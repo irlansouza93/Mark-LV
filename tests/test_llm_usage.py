@@ -514,3 +514,81 @@ def test_cost_of_live_message_on_the_callers_thread_is_tiny(usage_on):
         samples.append((time.perf_counter() - t0) * 1000)
     samples.sort()
     assert samples[int(len(samples) * 0.95)] < 0.2                # ms; generous bound, real value is ~0.005
+
+
+# ── voice sessions that never wrote their "end" (app closed by os._exit / Ctrl-C) ──────────
+def session(sid, event, ts, **kw):
+    r = {"kind": "live_session", "event": event, "ts": ts, "provider": "gemini",
+         "model": "live-m", "live_session": sid}
+    r.update(kw)
+    return r
+
+
+def turn(sid, ts):
+    return rec(ts, model="live-m", kind="live_turn", live_session=sid,
+               tokens=toks(in_text=10, out_audio=5, total=15), cost=0.01)
+
+
+def test_session_with_an_end_record_uses_its_duration():
+    s = llm_usage.summarize([
+        session("aaa", "start", "2026-10-17T10:00:00-03:00"),
+        turn("aaa", "2026-10-17T10:05:00-03:00"),
+        session("aaa", "end", "2026-10-17T10:20:00-03:00", duration_s=1200, turns=1, end_reason="voluntary"),
+    ], BRT)
+    assert s["totals"]["voice_minutes"] == pytest.approx(20.0)
+    assert s["totals"]["voice_minutes_estimated"] == 0 and s["totals"]["sessions_without_end"] == 0
+
+
+def test_session_without_an_end_is_estimated_from_its_last_record():
+    s = llm_usage.summarize([
+        session("bbb", "start", "2026-10-17T22:28:10-03:00"),
+        turn("bbb", "2026-10-17T22:29:47-03:00"),
+        turn("bbb", "2026-10-17T22:31:53-03:00"),          # the last thing it did: 3 min 43 s after the start
+    ], BRT)
+    t = s["totals"]
+    assert t["sessions_without_end"] == 1
+    assert t["voice_minutes_estimated"] == pytest.approx(223 / 60, abs=0.01)
+    assert t["voice_minutes"] == pytest.approx(223 / 60, abs=0.01)          # the estimate also counts as voice time
+    (row,) = s["rows"]
+    assert row["voice_minutes"] == pytest.approx(223 / 60, abs=0.01) and row["voice_minutes_estimated"] > 0
+    assert row["sessions_without_end"] == 1 and row["calls"] == 2
+
+
+def test_session_without_turns_is_zero_but_counted():
+    s = llm_usage.summarize([session("ccc", "start", "2026-10-17T09:00:00-03:00")], BRT)
+    assert s["totals"]["sessions_without_end"] == 1
+    assert s["totals"]["voice_minutes"] == 0 and s["totals"]["voice_minutes_estimated"] == 0
+    assert s["rows"] and s["rows"][0]["sessions_without_end"] == 1
+
+
+def test_one_shot_calls_during_the_session_extend_the_estimate():
+    s = llm_usage.summarize([
+        session("ddd", "start", "2026-10-17T10:00:00-03:00"),
+        rec("2026-10-17T10:07:00-03:00", live_session="ddd"),             # a oneshot made while the voice was open
+    ], BRT)
+    assert s["totals"]["voice_minutes_estimated"] == pytest.approx(7.0)
+
+
+def test_each_session_is_judged_on_its_own_id():
+    s = llm_usage.summarize([
+        session("one", "start", "2026-10-17T10:00:00-03:00"),
+        session("one", "end", "2026-10-17T10:10:00-03:00", duration_s=600),
+        session("two", "start", "2026-10-17T11:00:00-03:00"),
+        turn("two", "2026-10-17T11:02:00-03:00"),
+        turn("one", "2026-10-17T11:30:00-03:00"),                          # stale id: "one" HAS an end, so it is ignored
+    ], BRT)
+    t = s["totals"]
+    assert t["sessions_without_end"] == 1 and t["voice_minutes_estimated"] == pytest.approx(2.0)
+    assert t["voice_minutes"] == pytest.approx(12.0)
+
+
+def test_records_without_a_session_id_do_not_create_sessions():
+    s = llm_usage.summarize([session(None, "start", "2026-10-17T10:00:00-03:00"), rec("2026-10-17T10:05:00-03:00")], BRT)
+    assert s["totals"]["sessions_without_end"] == 0
+
+
+def test_estimated_minutes_land_on_the_day_of_the_last_record():
+    s = llm_usage.summarize([session("eee", "start", "2026-10-17T23:50:00-03:00"),
+                             turn("eee", "2026-10-18T00:10:00-03:00")], BRT)
+    (row,) = [r for r in s["rows"] if r["voice_minutes"]]
+    assert row["day"] == "2026-10-18" and row["voice_minutes"] == pytest.approx(20.0)

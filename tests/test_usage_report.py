@@ -179,3 +179,27 @@ def test_runs_as_a_script_in_a_plain_console(tmp_path, prices):
                          capture_output=True, text=True, encoding="cp1252", errors="strict")
     assert out.returncode == 0, out.stderr
     assert "Uso de LLM" in out.stdout
+
+
+def test_footer_says_when_voice_minutes_are_estimated(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    start = {"v": 1, "kind": "live_session", "event": "start", "ts": day_ts(0, 10, 0), "provider": "gemini",
+             "model": "live", "live_session": "abc12345", "voice": "Puck", "resumed": False}
+    last = rec(0, model="live", kind="live_turn", hour=10, live_session="abc12345")
+    last["ts"] = day_ts(0, 10, 4)
+    write(logs, [start, last])
+    code, out = run(capsys, "--logs", str(logs), "--days", "1")
+    assert code == 0
+    assert "voz: 4 min" in out
+    assert "4 min estimados" in out and "1 sessão sem fim registrado" in out
+    code, js = run(capsys, "--logs", str(logs), "--days", "1", "--json")
+    assert json.loads(js)["totals"]["sessions_without_end"] == 1
+
+
+def test_no_estimate_note_when_every_session_ended(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    end = {"v": 1, "kind": "live_session", "event": "end", "ts": day_ts(0, 11), "provider": "gemini",
+           "model": "live", "live_session": "z", "duration_s": 600, "turns": 3, "end_reason": "voluntary"}
+    write(logs, [rec(0, model="live", kind="live_turn", live_session="z"), end])
+    code, out = run(capsys, "--logs", str(logs), "--days", "1")
+    assert "voz: 10 min" in out and "estimados" not in out
