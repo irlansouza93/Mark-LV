@@ -87,6 +87,22 @@ Quando a frase traz "eu queria X", o modelo faz X e esquece de anotar; reescreve
 resolve de forma confiável. Decisão do Irlan (2026-10-18, spec FR-019b): o **código** grava o
 relato.
 
+### Resultado da 3ª rodada (2026-10-18, voz real, com relato automático — `956d520`)
+
+| Fala do Irlan | O que a transcrição do Gemini entregou | Resultado |
+|---|---|---|
+| "Não funcionou, eu queria o Excel com a minha planilha" | "1009, eu queria que me abrisse o povo, lembro de Office…" | **não registrou** — o reconhecimento trocou "não funcionou" por "1009" |
+| "Não funcionou." | "Não funcionou." | registrou (`source: tool`; o automático não duplicou) |
+| "Isso não deu certo, eu queria ver a previsão do tempo" | "Isso não deu certo. Eu queria ver aplicando o" | registrou (`source: auto`) |
+| "Deu errado, eu queria que abrisse o YouTube" | não visível (a fala do usuário não vai para o log de texto, de propósito) | **não registrou** — provavelmente também mal transcrita |
+| "Funcionou, obrigado" / "Isso funcionou muito bem" | — | nenhum registro (sem falso positivo) |
+
+**Limite aceito pelo Irlan (2026-10-18):** o gatilho é determinístico e funciona sempre que a
+frase chega transcrita; o que falha é o reconhecimento de voz do Gemini Live, fora do nosso
+controle. Afrouxar o gatilho para pegar transcrições erradas ("1009") criaria relatos falsos.
+SC-007 fica registrado como **não atingido por causa da transcrição** (2 de 4 na 3ª rodada; as
+duas falhas com frase mal reconhecida ou não visível), não por falha da lógica.
+
 ## Relato automático (FR-019b)
 
 Não depende do modelo e não muda o prompt do sistema nem a declaração (continua 265 caracteres).
