@@ -14,7 +14,7 @@ from memory import config_manager
 @pytest.fixture
 def usage(log_dir, tmp_path, monkeypatch):
     cfg = tmp_path / "api_keys.json"
-    cfg.write_text(json.dumps({"k": "unit-test-secret-value-0001"}), encoding="utf-8")
+    cfg.write_text(json.dumps({"gemini_api_key": "unit-test-secret-value-0001"}), encoding="utf-8")
     monkeypatch.setattr(errlog, "_CONFIG_PATH", cfg)
     prices = tmp_path / "prices.json"
     prices.write_text(json.dumps({"models": {"gemini/gemini-3.8-flash-tts": {"in": 0.5, "out": 9.0}}}), encoding="utf-8")

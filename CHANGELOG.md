@@ -30,6 +30,10 @@ PATCH a cada correção. Tags: `v55.x.y`.
     funcionou", "não deu certo" ou "deu errado" (`source: tool|auto` em `logs/reports.jsonl`).
   - Primeira base de testes (`tests/`, `requirements-dev.txt`) e a skill `lv-triage` atualizada com
     os formatos reais.
+  - **Limites conhecidos:** SC-007 (relato com a expectativa certa) não atingido — o reconhecimento de
+    voz do Gemini transcreve mal parte das frases (1 de 3 relatos com "eu queria X", e com X errado);
+    SC-004 conferido com uma sessão real de 3,5 min e 1 chamada avulsa (não 10 min); SC-008 (plugin em
+    loop por 10 min) não foi executado, só coberto por testes do limite de rajada.
 
 ### Changed
 - Exceção que escapa de um slot do Qt (ou de qualquer thread) não fecha mais o JARVIS: o

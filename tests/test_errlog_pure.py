@@ -95,10 +95,11 @@ def test_read_version_never_raises_on_empty_root(tmp_path):
 
 # ── months_to_delete (research R10) ──────────────────────────────────────────
 def test_months_to_delete_only_older_than_twelve_months():
-    names = ["usage-2025-09.jsonl", "usage-2025-10.jsonl", "usage-2026-10.jsonl",
+    names = ["usage-2025-09.jsonl", "usage-2025-10.jsonl", "usage-2025-11.jsonl", "usage-2026-10.jsonl",
              "usage-2024-01.jsonl"]
     got = errlog.months_to_delete(names, date(2026, 10, 16))
-    assert sorted(got) == ["usage-2024-01.jsonl", "usage-2025-09.jsonl"]
+    # Exactly 12 months stay: Nov 2025 .. Oct 2026.
+    assert sorted(got) == ["usage-2024-01.jsonl", "usage-2025-09.jsonl", "usage-2025-10.jsonl"]
 
 
 def test_months_to_delete_ignores_other_files():
@@ -108,9 +109,9 @@ def test_months_to_delete_ignores_other_files():
 
 
 def test_months_to_delete_handles_year_boundary():
-    got = errlog.months_to_delete(["usage-2025-01.jsonl", "usage-2024-12.jsonl"],
+    got = errlog.months_to_delete(["usage-2025-01.jsonl", "usage-2025-02.jsonl", "usage-2024-12.jsonl"],
                                   date(2026, 1, 5))
-    assert got == ["usage-2024-12.jsonl"]
+    assert sorted(got) == ["usage-2024-12.jsonl", "usage-2025-01.jsonl"]
 
 
 # ── BurstLimiter (research R10) ──────────────────────────────────────────────

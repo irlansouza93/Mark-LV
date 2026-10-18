@@ -43,6 +43,7 @@ caracteres (`traceback` em 8 000), com `…[+N chars]` no fim.
 |---|---|---|
 | `kind` | const | `report` |
 | `source` | enum | `tool` (o modelo chamou `report_problem`) · `auto` (gatilho na fala do usuário, FR-019b) |
+| `follows_auto` | str \| absent | só em relato `tool`: o `ts` do relato `auto` do **mesmo pedido** (a ferramenta relatou depois do automático); a triagem junta os dois |
 | `expected` | str | o que o usuário esperava, nas palavras dele (obrigatório; vazio → `"(not said)"`) |
 | `happened` | str \| null | o que deu errado, na descrição do modelo/usuário |
 | `transcript` | list[str] | últimas ~3 trocas (≤ 6 linhas `User: …` / `<Asst>: …`), cada uma cortada |

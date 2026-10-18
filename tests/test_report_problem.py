@@ -22,7 +22,7 @@ def read_lines(path):
 @pytest.fixture
 def on(log_dir, tmp_path, monkeypatch):
     cfg = tmp_path / "api_keys.json"
-    cfg.write_text(json.dumps({"k": SECRET}), encoding="utf-8")
+    cfg.write_text(json.dumps({"gemini_api_key": SECRET}), encoding="utf-8")
     monkeypatch.setattr(errlog, "_CONFIG_PATH", cfg)
     errlog.setup(log_dir, tee_console=False)
     return log_dir
@@ -333,20 +333,32 @@ def test_only_the_last_six_lines_survive_and_now_lines_are_last(on):
 
 
 def test_buffers_are_emptied_by_turn_complete(on):
-    errlog.bind(transcript=lambda: ["User: it is already in the session log"])
+    errlog.bind(transcript=lambda: ["User: half a sentence"])      # main.py logged the turn at turn_complete
     llm_usage.live_message(speech(user="half a sentence", assistant="half an answer"))
     llm_usage.live_message(speech(tc=True))
     handler()({"expected": "x"})
-    assert last_report(on)["transcript"] == ["User: it is already in the session log"]
+    assert last_report(on)["transcript"] == ["User: half a sentence"]
     llm_usage.live_message(speech(user="new turn"))
     handler()({"expected": "y"})
     assert last_report(on)["transcript"][-1] == "User (now): new turn"
 
 
-def test_a_message_that_both_speaks_and_completes_leaves_nothing_behind(on):
+def test_a_message_that_both_speaks_and_completes_leaves_the_buffers_empty(on):
+    errlog.bind(transcript=lambda: ["User: last words"])           # main.py logged the turn
+    llm_usage.live_message(speech(user="last words", tc=True))
+    assert errlog._turn_user == [] and errlog._turn_assistant == []
+    handler()({"expected": "x"})
+    assert last_report(on)["transcript"] == ["User: last words"]      # no "(now)" duplicate of what the log has
+
+
+def test_without_a_session_log_the_request_words_stay_until_the_user_speaks_again(on):
     llm_usage.live_message(speech(user="last words", tc=True))
     handler()({"expected": "x"})
-    assert last_report(on)["transcript"] == []
+    assert last_report(on)["transcript"] == ["User (now): last words"]
+    llm_usage.live_message(speech(user="another request"))
+    llm_usage.live_message(speech(tc=True))
+    handler()({"expected": "y"})
+    assert last_report(on)["transcript"] == ["User (now): another request"]
 
 
 def test_a_secret_in_the_current_speech_is_masked(on):

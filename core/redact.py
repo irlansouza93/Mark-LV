@@ -44,7 +44,14 @@ _SENSITIVE_KEY = re.compile(
 _AUTH_HEADER = re.compile(r"(?i)(authorization\s*[:=]\s*)([^\r\n]+)")
 _BEARER = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=\-]{8,})")
 _URL_PARAM = re.compile(r"(?i)([?&](?:api_?key|key|access_token|token)=)([^&\s\"'<>]+)")
+# "name: value" / "name=value" outside a dict, where the value-by-key rule cannot see it:
+# `x-goog-api-key: …`, `api_key=…`, the repr of a dict (`'api_key': 'abc'`), a JSON fragment.
+# The name is followed directly by the separator, so prose ("the secret to…", "max_tokens: 256")
+# is left alone.
+_NAMED_VALUE = re.compile(
+    r"(?i)((?:x-goog-api-key|api[_\-]?key|token|secret|password)[\"']?\s*[:=]\s*[\"']?)([^\s\"',;&}\])]+)")
 _SHAPES = (
+    re.compile(r"\bAQ\.[A-Za-z0-9_.\-]{20,}"),             # Google key, the newer AQ. format (dots and dashes inside)
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),                 # Google API key
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),                 # OpenAI / DeepSeek / sk-proj- / sk-ant-
     re.compile(r"\b\d{8,10}:[A-Za-z0-9_\-]{35}\b"),        # Telegram bot token
@@ -66,6 +73,7 @@ def _redact_str(text: str, secrets: list[str]) -> str:
     text = _AUTH_HEADER.sub(lambda m: m.group(1) + mask(m.group(2).strip()), text)
     text = _BEARER.sub(lambda m: m.group(1) + mask(m.group(2)), text)
     text = _URL_PARAM.sub(lambda m: m.group(1) + mask(m.group(2)), text)
+    text = _NAMED_VALUE.sub(lambda m: m.group(1) + mask(m.group(2)), text)
     for rx in _SHAPES:
         text = rx.sub(lambda m: mask(m.group(0)), text)
     return text
@@ -96,24 +104,40 @@ def redact(value: Any, secrets: Iterable[str] = ()) -> Any:
     return _walk(value, ordered)
 
 
-def _collect_strings(node: Any, out: list[str]) -> None:
+def _collect_strings(node: Any, out: list[str], everything: bool = False) -> None:
+    """Strings of 16+ characters that are secrets: under a key whose name is sensitive
+    (``gemini_api_key``, ``bot_token``…), or ANYTHING under ``plugin_config`` (``everything``).
+    A harmless value such as ``hud_style: "model:avatar-name"`` is not a secret and must stay
+    readable in the logs."""
     if isinstance(node, str):
-        if len(node) >= 16 and node not in out:
+        if everything and len(node) >= 16 and node not in out:
             out.append(node)
     elif isinstance(node, dict):
-        for v in node.values():
-            _collect_strings(v, out)
+        for k, v in node.items():
+            plugin = everything or k == "plugin_config"
+            sensitive = isinstance(k, str) and bool(_SENSITIVE_KEY.search(k))
+            if isinstance(v, str):
+                if (plugin or sensitive) and len(v) >= 16 and v not in out:
+                    out.append(v)
+            else:
+                _collect_strings(v, out, plugin or sensitive)
     elif isinstance(node, (list, tuple)):
         for v in node:
-            _collect_strings(v, out)
+            _collect_strings(v, out, everything)
 
 
-def load_config_secrets(path: Path) -> list[str]:
-    """String values with 16+ characters from a JSON config (api_keys.json). Never raises."""
+def read_config_secrets(path: Path) -> list[str] | None:
+    """The secrets of a JSON config, or None when the file could not be read or parsed (it may be
+    in the middle of being rewritten — the caller should keep what it already knows)."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
-        return []
+        return None
     found: list[str] = []
     _collect_strings(data, found)
     return found
+
+
+def load_config_secrets(path: Path) -> list[str]:
+    """``read_config_secrets`` that answers an empty list when the file cannot be read."""
+    return read_config_secrets(path) or []

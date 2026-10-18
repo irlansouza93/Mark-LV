@@ -100,8 +100,14 @@ relato.
 **Limite aceito pelo Irlan (2026-10-18):** o gatilho é determinístico e funciona sempre que a
 frase chega transcrita; o que falha é o reconhecimento de voz do Gemini Live, fora do nosso
 controle. Afrouxar o gatilho para pegar transcrições erradas ("1009") criaria relatos falsos.
-SC-007 fica registrado como **não atingido por causa da transcrição** (2 de 4 na 3ª rodada; as
-duas falhas com frase mal reconhecida ou não visível), não por falha da lógica.
+SC-007 fica registrado como **não atingido**, e a causa provável é a transcrição, não a lógica. O que
+está **comprovado** e o que **não**: só **uma** das duas falhas é uma má transcrição comprovada (a
+frase 1, em que "não funcionou" virou "1009" no log); a frase 4 não registrou e a transcrição dela
+**não é visível** (a fala do usuário não vai para o log de texto, de propósito), então "provavelmente
+também mal reconhecida" é uma hipótese. Pela medida da SC-007 ("eu queria X" com X no relato): das
+**3** frases da 3ª rodada que traziam "eu queria X", só **1** gerou relato (a frase 3, `source: auto`)
+e o X veio errado ("ver aplicando o" em vez de "ver a previsão do tempo"). Resultado: 0 de 3 com o
+X correto no relato.
 
 ## Relato automático (FR-019b)
 
@@ -118,10 +124,15 @@ Não depende do modelo e não muda o prompt do sistema nem a declaração (conti
   linhas) e as últimas 8 ferramentas; as falhas dos últimos 10 min entram como em qualquer relato.
 - **Confirmação:** `notify_once("auto_report", "SYS: Problem noted for triage.", every_s=20)` no
   log da tela (uma vez a cada 20 s, mesmo que haja vários relatos).
-- **Sem duplicar:** se a ferramenta `report_problem` gravou relato **no mesmo turno**, o
-  automático não grava. Relato da ferramenta em turno **seguinte** (o modelo perguntou e o
-  usuário completou a expectativa) é mantido como relato separado. Todo relato da ferramenta
-  leva `source: "tool"`.
+- **Sem duplicar — por pedido, não por turno:** um pedido que usa uma ferramenta passa por vários
+  `turn_complete`, então o estado "já relatado" só é zerado quando chega **fala nova do usuário**
+  (ou uma sessão de voz nova). Se a ferramenta já relatou o pedido, o automático não grava, nem em
+  `turn_complete` posteriores. Se o automático saiu primeiro (no 1º `turn_complete`) e a ferramenta
+  relata depois no mesmo pedido, **os dois ficam**, e o relato `tool` leva `follows_auto: <ts do
+  automático>` para a triagem juntá-los; ele também leva a fala do usuário que o disparou (guardada
+  até chegar fala nova), mesmo depois de os buffers do turno terem sido esvaziados. Relato da
+  ferramenta em pedido **seguinte** (o modelo perguntou e o usuário completou a expectativa) é um
+  relato separado, sem `follows_auto`. Todo relato da ferramenta leva `source: "tool"`.
 - **Custo no caminho do áudio:** no `turn_complete`, uma normalização + um regex sobre texto curto
   e um `put` na fila (medido: p50 8 µs, p95 11 µs com gatilho; 6 µs sem; 2 µs sem fala).
 - **O que continua com a ferramenta:** "anota esse problema: …" e a expectativa completada depois

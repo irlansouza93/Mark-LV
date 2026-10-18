@@ -109,9 +109,11 @@ def test_load_config_secrets_keeps_only_long_strings(tmp_path):
         "flag": True,
         "count": 12345678901234567890,
         "plugins": {"telegram": {"bot_token": TELEGRAM}, "list": ["z" * 16, "no"]},
+        "plugin_config": {"telegram": {"chat": "c" * 16}},
     }), encoding="utf-8")
     got = load_config_secrets(cfg)
-    assert set(got) == {GEMINI, TELEGRAM, "z" * 16}
+    # Sensitive names (bot_token, gemini_api_key) and everything under plugin_config; "list" is neither.
+    assert set(got) == {GEMINI, TELEGRAM, "c" * 16}
 
 
 def test_load_config_secrets_never_raises(tmp_path):

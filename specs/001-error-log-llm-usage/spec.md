@@ -311,6 +311,16 @@ o modelo escolhe a ferramenta e confirma em voz.
   em `logs/`.
 - **SC-009**: A suíte de testes da lógica pura roda em menos de 10 segundos sem rede.
 
+**Limites conhecidos (fechamento da implementação, 2026-10-18):**
+- **SC-007 não atingido.** Na 3ª rodada de voz, das 3 frases com "eu queria X" só 1 gerou relato, e com o
+  X errado ("ver aplicando o"): o reconhecimento de voz do Gemini Live transcreve mal parte das frases
+  ("não funcionou" virou "1009" numa delas). A lógica do gatilho é determinística e funciona quando a
+  frase chega certa; aceito pelo Irlan.
+- **SC-004 conferido com uma sessão real de 3,5 minutos e 1 chamada avulsa**, não de 10 minutos com
+  3–4 chamadas; 8 de 8 registros com tokens e o custo de um turno conferido à mão.
+- **SC-008 (plugin em loop por 10 minutos) não foi executado**; está coberto só pelos testes do limite
+  de rajada, do tamanho dos arquivos e da rotação.
+
 ## Assumptions
 
 - **Local e privado:** tudo fica em `logs/`, já no `.gitignore`; nada é enviado para fora. Os

@@ -2281,7 +2281,7 @@ class JarvisLive:
 
         while True:
             try:
-                _end_reason = "shutdown"
+                _end_reason, _end_ts, _connected, _resumed_with = "shutdown", None, False, False
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
                 # Pick the rung to open the conversation on. A model resting
@@ -2321,6 +2321,7 @@ class JarvisLive:
                     self._interrupted          = False
 
                     print("[JARVIS] Connected.")
+                    _connected = True
                     errlog.new_live_session()
                     llm_usage.live_session_start(live_model, get_voice(), _resumed_with)
                     if _resumed_with:
@@ -2379,7 +2380,7 @@ class JarvisLive:
                 # session immediately with no backoff and no scary logs.
                 if _is_reconnect_signal(e):
                     print("[JARVIS] Voluntary reconnect requested.")
-                    _end_reason = "voluntary"
+                    _end_reason, _end_ts = "voluntary", time.time()
                     if not _keep_context_of(e):
                         # A deliberate clean slate (voice change) — drop the
                         # handle so the next connect really does start empty.
@@ -2387,9 +2388,9 @@ class JarvisLive:
                     self._conn_backoff = 0
                     continue
 
-                _end_reason = "error"
-                errlog.record_failure("live", "live_connect", exc=e, phase="resume" if _resumed_with else "connect",
-                                      context={"model": live_model, "voice": get_voice(), "resumed": _resumed_with,
+                _end_reason, _end_ts = "error", time.time()
+                errlog.record_failure("live", "live_connect", exc=e, phase="receive" if _connected else ("resume" if _resumed_with else "connect"),
+                                      context={"model": LIVE_MODEL, "voice": get_voice(), "resumed": _resumed_with,
                                                "attempt": errlog.next_live_attempt(),
                                                "backoff_s": getattr(self, "_conn_backoff", 3),
                                                "classified": errlog.classify_live_error(e, _resumed_with)})
@@ -2489,7 +2490,8 @@ class JarvisLive:
                 else:
                     self._conn_backoff = 3
             finally:
-                llm_usage.live_session_end(_end_reason)
+                llm_usage.live_session_end(_end_reason, _end_ts)
+                errlog.set_live_session(None)
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
                 if len(self._session_log) >= 3:

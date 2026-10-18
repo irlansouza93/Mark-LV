@@ -44,8 +44,9 @@ antes), `ts` (ISO com fuso), `app` (`55.1.0+<commit>`), `pid` e `live_session` (
 são esperados** — descarte-os), `expected` (nas palavras do usuário; `(not said)` se vazio),
 `happened`, `transcript` (≤ 6 linhas; a última pode ser `User (now): …`), `recent_tools` (8
 últimas: `{ts, name, args, result, soft_failure}`) e `recent_failures` (últimos 10 min). Só relatos
-têm transcrição; falha automática nunca tem. Um `auto` seguido de um `tool` com a expectativa
-completa são o mesmo problema: junte-os.
+têm transcrição; falha automática nunca tem. Um relato `tool` com `follows_auto: <ts>` completa o
+`auto` daquele `ts` (mesmo pedido): junte-os. Também junte um `auto` e o `tool` seguinte que traz a
+expectativa completa, mesmo sem o campo.
 
 **`usage-*.jsonl`** — `kind`: `oneshot` (escada do Gemini), `live_turn`, `tts`, `live_session`
 (`event: start|end`); `model`, `tier_requested`, `billing` (`free|paid`), `result`

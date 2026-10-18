@@ -26,7 +26,7 @@ def _boom_handler(parameters=None, **_):
 @pytest.fixture
 def on(log_dir, tmp_path, monkeypatch):
     cfg = tmp_path / "api_keys.json"
-    cfg.write_text(json.dumps({"k": SECRET}), encoding="utf-8")
+    cfg.write_text(json.dumps({"gemini_api_key": SECRET}), encoding="utf-8")
     monkeypatch.setattr(errlog, "_CONFIG_PATH", cfg)
     errlog.setup(log_dir, tee_console=False)
     yield log_dir / "failures.jsonl"

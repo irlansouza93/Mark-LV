@@ -330,7 +330,7 @@ def test_pacific_day_across_dst_changes():
 @pytest.fixture
 def usage_on(log_dir, tmp_path, monkeypatch):
     cfg = tmp_path / "api_keys.json"
-    cfg.write_text(json.dumps({"k": "unit-test-secret-value-0001"}), encoding="utf-8")
+    cfg.write_text(json.dumps({"gemini_api_key": "unit-test-secret-value-0001"}), encoding="utf-8")
     monkeypatch.setattr(errlog, "_CONFIG_PATH", cfg)
     prices = tmp_path / "prices.json"
     prices.write_text(json.dumps(PRICES), encoding="utf-8")

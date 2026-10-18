@@ -180,7 +180,7 @@ def test_note_tool_clips_long_values_and_never_raises(on):
     errlog.note_tool("big", {"text": "x" * 5000}, "r" * 5000)
     errlog.note_tool(None, None, None)
     (entry, _) = errlog._recent_tools()[:2]
-    assert len(entry["result"]) <= 600 and len(entry["args"]["text"]) <= 600
+    assert len(entry["result"]) <= 1100 and len(entry["args"]["text"]) <= 1100      # 500 + slack + counter
 
 
 def test_note_tool_before_setup_is_harmless():

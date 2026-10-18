@@ -108,7 +108,7 @@ def test_config_secrets_are_reloaded_when_the_file_changes(log_dir, cfg):
     errlog._enqueue("failures", {"message": "first"})
     errlog.flush()
     new_secret = "another-brand-new-secret-9999"
-    cfg.write_text(json.dumps({"k": new_secret}), encoding="utf-8")
+    cfg.write_text(json.dumps({"gemini_api_key": new_secret}), encoding="utf-8")
     later = time.time() + 5
     os.utime(cfg, (later, later))                            # mtime moves even on coarse clocks
     errlog._enqueue("failures", {"message": f"leaks {new_secret}"})

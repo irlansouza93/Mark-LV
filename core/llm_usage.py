@@ -429,11 +429,14 @@ def _fin_session_end(rec: dict, ts: float):
     return rec
 
 
-def live_session_end(reason: str) -> None:
-    """The voice session ended: ``voluntary`` (reconnect we asked for), ``error`` or ``shutdown``."""
+def live_session_end(reason: str, ts: float | None = None) -> None:
+    """The voice session ended: ``voluntary`` (reconnect we asked for), ``error`` or ``shutdown``.
+    ``ts`` is when it really ended: the connection loop's ``finally`` runs after the backoff sleep
+    and after waiting for a new key, which would inflate ``duration_s``, so main.py captures the
+    time at the start of the ``except`` and passes it here (``None`` = now)."""
     try:
         errlog._enqueue("usage", {"kind": "live_session", "provider": "gemini", "event": "end",
-                                  "end_reason": reason, "_finalize": _fin_session_end})
+                                  "end_reason": reason, "_finalize": _fin_session_end}, ts=ts)
     except Exception:
         pass
 

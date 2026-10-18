@@ -101,7 +101,7 @@ def test_circular_chains_do_not_hang():
 @pytest.fixture
 def on(log_dir, tmp_path, monkeypatch):
     cfg = tmp_path / "api_keys.json"
-    cfg.write_text(json.dumps({"k": "unit-test-secret-value-0001"}), encoding="utf-8")
+    cfg.write_text(json.dumps({"gemini_api_key": "unit-test-secret-value-0001"}), encoding="utf-8")
     monkeypatch.setattr(errlog, "_CONFIG_PATH", cfg)
     errlog.setup(log_dir, tee_console=False)
     return log_dir / "failures.jsonl"

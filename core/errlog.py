@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
+import io
 import json
 import logging
 import math
@@ -47,7 +48,7 @@ from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from core.redact import load_config_secrets, redact
+from core.redact import read_config_secrets, redact
 
 ROOT = Path(__file__).resolve().parent.parent
 _UTC = timezone.utc
@@ -154,7 +155,7 @@ def months_to_delete(filenames, today: date, keep_months: int = 12) -> list[str]
         year, month = int(m.group(1)), int(m.group(2))
         if not 1 <= month <= 12:
             continue
-        if now_idx - (year * 12 + month - 1) > keep_months:
+        if now_idx - (year * 12 + month - 1) >= keep_months:      # this month + the 11 before it = 12
             out.append(name)
     return out
 
@@ -511,9 +512,15 @@ def ladder_message(reasons: dict, now: datetime | None = None) -> str:
     if n and all(v == "network" for v in reasons.values()):
         return "SYS: Gemini unreachable — check the connection."
     quota = sum(1 for v in reasons.values() if v == "quota")
-    if n and quota * 2 > n:
+    other = n - quota
+    # The predominant reason (FR-004a): quota, outage, or both when neither is two thirds of it.
+    if quota and quota * 3 >= n * 2:
         back = quota_reset_local(now or datetime.now(_UTC), None)
         return f"SYS: Gemini free quota used up on {quota} models — back at {back:%H:%M}."
+    if quota and other * 3 < n * 2:
+        back = quota_reset_local(now or datetime.now(_UTC), None)
+        return (f"SYS: Gemini free quota used up on {quota} models and {other} not answering "
+                f"— quota back at {back:%H:%M}.")
     return f"SYS: Gemini models not answering ({n} tried) — try again shortly."
 
 
@@ -567,13 +574,45 @@ _atexit_registered = False
 _orig_streams: dict = {}
 
 
+# After a rotation fails (Windows: another process — an editor, a viewer, antivirus — has the
+# file open, WinError 32) the handler keeps appending past the size limit and tries again only
+# after this many records or seconds. Without it every emit retried, failed and lost its record
+# (34 of 35 records, with the rotation half done).
+_ROTATE_RETRY_RECORDS = 200
+_ROTATE_RETRY_S = 60.0
+
+
 class _Rotating(RotatingFileHandler):
     """A RotatingFileHandler that never prints "--- Logging error ---" itself: failures
-    go to our single warning. UTF-8, lazily opened (no empty files)."""
+    go to our single warning. UTF-8, lazily opened (no empty files). A rotation that cannot
+    rename does not cost records: it reopens the current file and carries on."""
 
     def __init__(self, filename, max_bytes: int, backups: int):
         super().__init__(filename, maxBytes=max_bytes, backupCount=backups,
                          encoding="utf-8", delay=True)
+        self._rotate_blocked = 0                 # records written since the last failed rotation (0 = not blocked)
+        self._rotate_retry_at = 0.0
+
+    def doRollover(self):
+        if self._rotate_blocked and (self._rotate_blocked < _ROTATE_RETRY_RECORDS
+                                     and time.monotonic() < self._rotate_retry_at):
+            self._rotate_blocked += 1            # still waiting before trying again: just keep appending
+            return
+        try:
+            super().doRollover()
+            self._rotate_blocked = 0
+        except OSError as e:
+            self._rotate_blocked = 1
+            self._rotate_retry_at = time.monotonic() + _ROTATE_RETRY_S
+            try:
+                if self.stream is None:
+                    self.stream = self._open()   # the file was closed for the rename: reopen it in append mode
+            except OSError:
+                pass
+            _warn_once(f"rotate:{self.baseFilename}",
+                       f"[JARVIS] errlog: could not rotate {Path(self.baseFilename).name} "
+                       f"({type(e).__name__}: {e}); keeping on appending to it and retrying later.",
+                       "SYS: A log file is locked by another program — logging continues without rotating it.")
 
     def handleError(self, record):
         _warn_write_failed(sys.exc_info()[1])
@@ -730,10 +769,12 @@ def _current_secrets() -> list:
     try:
         mt = _CONFIG_PATH.stat().st_mtime_ns
     except OSError:
-        mt = None
+        return _sec_values                       # file gone for a moment (being replaced): keep what we know
     if mt != _sec_mtime:
-        _sec_values = load_config_secrets(_CONFIG_PATH) if mt is not None else []
-        _sec_mtime = mt
+        got = read_config_secrets(_CONFIG_PATH)
+        if got is None:
+            return _sec_values                   # unreadable now (mid-rewrite): keep the old ones and retry next time
+        _sec_values, _sec_mtime = got, mt        # only a successful read moves the mtime forward
     return _sec_values
 
 
@@ -788,19 +829,39 @@ def _normalize(obj, depth: int = 0):
         return f"<{type(obj).__name__}>"
 
 
+# Cutting text BEFORE the secret filter can leave a piece of a key: a 47-character key that
+# crosses the cut keeps 35 readable characters on one side (reproduced in review). So every
+# cut before the filter leaves SLACK extra characters — longer than any key — and the real,
+# final cut is made by the writer AFTER the filter. A key crossing the early cut then lies
+# entirely beyond the final limit and is gone with it. The early cut also bounds what the
+# filter has to scan: a 2 MB console line held the GIL for ~33 ms (35 ms per MB of text).
+_SLACK = 512
+_CALLER_CUT = _MAX_TEXT + _SLACK               # what a caller-side clip keeps (note_tool)
+_CUT_MARK = re.compile(r"…\[\+(\d+) chars\]$")
+
+
 def _cut(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` characters plus a ``…[+N chars]`` counter. A text already cut
+    earlier (it ends with such a counter) keeps counting the characters that were really lost."""
     if len(text) <= limit:
         return text
-    return f"{text[:limit]}…[+{len(text) - limit} chars]"
+    already = 0
+    m = _CUT_MARK.search(text, max(0, len(text) - 32))
+    if m:
+        already = int(m.group(1))
+        text = text[:m.start()]
+        if len(text) <= limit:
+            return f"{text}…[+{already} chars]"
+    return f"{text[:limit]}…[+{len(text) - limit + already} chars]"
 
 
-def _truncate(obj, key: str | None = None):
+def _truncate(obj, key: str | None = None, slack: int = 0):
     if isinstance(obj, str):
-        return _cut(obj, _MAX_TRACEBACK if key == "traceback" else _MAX_TEXT)
+        return _cut(obj, (_MAX_TRACEBACK if key == "traceback" else _MAX_TEXT) + slack)
     if isinstance(obj, dict):
-        return {k: _truncate(v, k) for k, v in obj.items()}
+        return {k: _truncate(v, k, slack) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_truncate(v, key) for v in obj]
+        return [_truncate(v, key, slack) for v in obj]
     return obj
 
 
@@ -917,9 +978,10 @@ def _write_record(stream: str, record: dict, ts: float, session, _summary: bool 
     dropped = _take_dropped()
     if dropped:
         out["dropped"] = dropped
-    # Order matters: normalize (JSON-safe) -> redact the FULL text -> only then cut, so a
-    # secret that straddles the cut is masked rather than half-shown.
-    out = _truncate(redact(_normalize(out), _current_secrets()))
+    # Order matters: normalize (JSON-safe) -> early cut WITH slack (bounds the filter's work) ->
+    # redact -> the real cut. A secret straddling the real cut is masked first; one straddling
+    # the early cut lies past the real limit and is removed by it (see _SLACK).
+    out = _truncate(redact(_truncate(_normalize(out), slack=_SLACK), _current_secrets()))
     line = json.dumps(out, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     try:
         if stream == "usage":
@@ -949,7 +1011,7 @@ def _drain_suppressed(force: bool = False) -> None:
 
 def _write_text(tag: str, line: str, ts: float) -> None:
     stamp = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    text = _cut(redact(_clean_str(line), _current_secrets()), _MAX_LINE)
+    text = _cut(redact(_clean_str(_cut(line, _MAX_LINE + _SLACK)), _current_secrets()), _MAX_LINE)
     try:
         _emit(_handler("jarvis", "jarvis", _FILES["jarvis"]), f"{stamp} {tag} {text}")
     except Exception as e:
@@ -1045,7 +1107,7 @@ def _kind_for(component, error_type) -> str:
     return "exception"
 
 
-def _enqueue_failure(kind, component, name, exc, error_type, message, phase, context, origin, caller) -> None:
+def _enqueue_failure(kind, component, name, exc, error_type, message, phase, context, origin, caller) -> str | None:
     """The one door every failure goes through — hooks, loaders, excepthooks — so each gets
     the same signature, origin and burst limit. Only builds a dict; the writer does the rest."""
     rec = {"kind": kind, "component": component, "name": name, "phase": phase,
@@ -1058,7 +1120,7 @@ def _enqueue_failure(kind, component, name, exc, error_type, message, phase, con
         rec["exc"] = exc
     if caller:
         rec["_caller"] = caller
-    _enqueue("failures", rec)
+    return _enqueue("failures", rec)
 
 
 def record_failure(component: str, name: str, *, exc: BaseException | None = None,
@@ -1100,13 +1162,13 @@ def note_tool(name, args, result) -> None:
         # report_problem answers "Could not log it: …" when it fails: an error report about the
         # error report would be noise, so that tool is never judged as a soft failure.
         soft = None if str(name) in _NO_SOFT_FAILURE else classify_soft_failure(text[:300])
-        clipped = ({k: (_cut(v, _MAX_TEXT) if isinstance(v, str) else v) for k, v in args.items()}
+        clipped = ({k: (_cut(v, _CALLER_CUT) if isinstance(v, str) else v) for k, v in args.items()}
                    if isinstance(args, dict) else args)
         _tools.append({"ts": datetime.now().astimezone().isoformat(timespec="seconds"),
-                       "name": str(name), "args": clipped, "result": _cut(text, _MAX_TEXT),
+                       "name": str(name), "args": clipped, "result": _cut(text, _CALLER_CUT),
                        "soft_failure": soft is not None})
         if soft:
-            _enqueue_failure("soft", "tool", name, None, soft, _cut(text, _MAX_TEXT), None,
+            _enqueue_failure("soft", "tool", name, None, soft, _cut(text, _CALLER_CUT), None,
                              {"args": clipped, "result": text}, "main.py:_execute_tool", None)
     except Exception:
         pass
@@ -1151,11 +1213,29 @@ def _push_chunk(buf: list, side: str, text) -> None:
         _turn_chars[side] -= len(buf.pop(0)) + 1
 
 
+# A REQUEST is what the user asked, from their first words until their NEXT words: a request that
+# needs a tool passes through several turn_completes (main.py documents it), so "this turn" is
+# the wrong unit for "was it already reported?". The request state below therefore survives
+# end_turn() and is reset only by new speech from the user (or a new voice session).
+_tool_reported = False        # the report_problem tool already wrote a report for this request
+_auto_ts = None               # "ts" the automatic report of this request was written with (for follows_auto)
+_last_request = ""            # the user's words of this request, kept after the turn buffers are emptied
+_request_closed = False       # an end_turn() happened since the user last spoke
+
+
+def _reset_request() -> None:
+    global _tool_reported, _auto_ts, _last_request, _request_closed
+    _tool_reported, _auto_ts, _last_request, _request_closed = False, None, "", False
+
+
 def note_speech(user=None, assistant=None) -> None:
     """Add transcription chunks of the turn in progress (``input_transcription.text`` /
-    ``output_transcription.text``). Called from the audio receive loop: only appends. Never raises."""
+    ``output_transcription.text``). Called from the audio receive loop: only appends. Words from
+    the user after a completed turn start a new request. Never raises."""
     try:
         if user:
+            if _request_closed and isinstance(user, str) and user.strip():
+                _reset_request()
             _push_chunk(_turn_user, "u", user)
         if assistant:
             _push_chunk(_turn_assistant, "a", assistant)
@@ -1163,14 +1243,18 @@ def note_speech(user=None, assistant=None) -> None:
         pass
 
 
+def _clear_buffers() -> None:
+    _turn_user.clear()
+    _turn_assistant.clear()
+    _turn_chars["u"] = _turn_chars["a"] = 0
+
+
 def discard_turn() -> None:
-    """Forget the turn in progress without judging it (a new voice session, shutdown)."""
-    global _tool_reported
+    """Forget the turn and the request in progress without judging them (a new voice session,
+    shutdown)."""
     try:
-        _turn_user.clear()
-        _turn_assistant.clear()
-        _turn_chars["u"] = _turn_chars["a"] = 0
-        _tool_reported = False
+        _clear_buffers()
+        _reset_request()
     except Exception:
         pass
 
@@ -1199,27 +1283,37 @@ def problem_trigger(text) -> bool:
         return False
 
 
-_tool_reported = False        # the report_problem tool already wrote a report during this turn
-
-
 def end_turn() -> None:
     """The turn is complete (main.py is about to log it): if the user's words in it reported a
-    problem, write the automatic report now; then drop the draft. Runs on the audio thread, so
-    it is one regex over a short string and one queue put — nothing else."""
+    problem and this request has no report yet (neither the tool's nor an earlier automatic one),
+    write the automatic report now; then empty the turn buffers. The request state stays until the
+    user speaks again. Runs on the audio thread: one regex over a short string and one queue put."""
+    global _auto_ts, _last_request, _request_closed
     try:
         said = " ".join(list(_turn_user)).strip()
-        if said and not _tool_reported and problem_trigger(said):
-            if _queue_report(said, None, "auto") is None:
-                notify_once("auto_report", "SYS: Problem noted for triage.", every_s=20)
+        if said:
+            _last_request = said
+            if not _tool_reported and _auto_ts is None and problem_trigger(said):
+                ts = time.time()
+                if _queue_report(said, None, "auto", ts=ts) is None:
+                    _auto_ts = datetime.fromtimestamp(ts).astimezone().isoformat(timespec="milliseconds")
+                    notify_once("auto_report", "SYS: Problem noted for triage.", every_s=20)
+        _clear_buffers()
+        _request_closed = True
     except Exception:
         pass
-    discard_turn()
 
 
-def _turn_in_progress() -> list:
+def _turn_in_progress(provider_lines=()) -> list:
+    """The ``(now)`` lines: what is being said, or — after the turn buffers were emptied but before the
+    user speaks again — the user's words of this request, unless the session log already has them."""
     lines = []
     said = " ".join(list(_turn_user)).strip()
     drafted = " ".join(list(_turn_assistant)).strip()
+    if not said and _last_request:
+        key = _fold(_last_request)[:40]
+        if key and not any(key in _fold(line) for line in provider_lines):
+            said = _last_request
     if said:
         lines.append(f"User (now): {said}")
     if drafted:
@@ -1239,7 +1333,7 @@ def record_report(expected, happened=None) -> str | None:
     return reason
 
 
-def _queue_report(expected, happened, source: str) -> str | None:
+def _queue_report(expected, happened, source: str, ts: float | None = None) -> str | None:
     """The report with the last lines of the conversation (the provider bound by
     ``bind(transcript=…)`` plus the turn in progress), the last 8 tools run and the failures
     of the last 10 minutes. Only reports ever store the conversation.
@@ -1255,12 +1349,15 @@ def _queue_report(expected, happened, source: str) -> str | None:
                 lines = [str(x) for x in list(got)[-_REPORT_TRANSCRIPT_LINES:]] if got else []
             except Exception:
                 lines = []
-        lines = (lines + _turn_in_progress())[-_REPORT_TRANSCRIPT_LINES:]    # + the sentence still being spoken
+        lines = (lines + _turn_in_progress(lines))[-_REPORT_TRANSCRIPT_LINES:]    # + the sentence still being spoken
         said = str(expected).strip() if expected is not None else ""
         went_wrong = str(happened).strip() if happened is not None else ""
-        return _enqueue("reports", {"kind": "report", "source": source, "expected": said or "(not said)",
-                                    "happened": went_wrong or None, "transcript": lines,
-                                    "recent_tools": _recent_tools(), "_finalize": _fin_report})
+        rec = {"kind": "report", "source": source, "expected": said or "(not said)",
+               "happened": went_wrong or None, "transcript": lines,
+               "recent_tools": _recent_tools(), "_finalize": _fin_report}
+        if source == "tool" and _auto_ts:
+            rec["follows_auto"] = _auto_ts        # the same request already has an automatic report: triage joins them
+        return _enqueue("reports", rec, ts=ts)
     except Exception as e:
         return f"{type(e).__name__}: {e}"
 
@@ -1330,8 +1427,13 @@ class _Tee:
             self._buf += s
             *lines, self._buf = self._buf.split("\n")
             if len(self._buf) > 4 * _MAX_LINE:             # a progress bar with no newline
-                lines.append(self._buf)
-                self._buf = ""
+                # Split at the last space, not at the limit: a key has no spaces, so it cannot be
+                # cut in two (each half would escape the filter). No space at all = one huge token.
+                cut = self._buf.rfind(" ")
+                if cut <= 0:
+                    cut = len(self._buf)
+                lines.append(self._buf[:cut])
+                self._buf = self._buf[cut:].lstrip(" ")
         for line in lines:
             line = line.rstrip("\r")
             if line.strip():
@@ -1343,6 +1445,23 @@ class _Tee:
                 self._orig.flush()
         except Exception:
             pass
+
+    # With no console (pythonw: sys.stdout is None) these answer as a closed stream would, instead
+    # of raising AttributeError into code that probes them (logging, click, colorama, uvicorn).
+    def isatty(self):
+        try:
+            return bool(self._orig.isatty()) if self._orig is not None else False
+        except Exception:
+            return False
+
+    def fileno(self):
+        if self._orig is None:
+            raise io.UnsupportedOperation("fileno")
+        return self._orig.fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self._orig, "encoding", None) or "utf-8"
 
     def __getattr__(self, name):                          # encoding, isatty, fileno, buffer, reconfigure…
         orig = self.__dict__.get("_orig")
@@ -1377,10 +1496,17 @@ _prev_excepthook = None
 _prev_thread_hook = None
 
 
+def _tell_user_of_uncaught(queued_reason) -> None:
+    """The failure is logged; say so on screen (once a minute) — otherwise an exception that escapes
+    is invisible unless someone reads the console."""
+    if queued_reason is None:
+        notify_once("uncaught", "SYS: Internal error — logged for triage.", every_s=60)
+
+
 def _excepthook(tp, val, tb) -> None:
     try:
         if not issubclass(tp, KeyboardInterrupt):          # Ctrl+C is not a failure
-            _enqueue_failure("uncaught", "app", "main", val, None, "", None, None, None, None)
+            _tell_user_of_uncaught(_enqueue_failure("uncaught", "app", "main", val, None, "", None, None, None, None))
     except Exception:
         pass
     (_prev_excepthook or sys.__excepthook__)(tp, val, tb)
@@ -1390,7 +1516,8 @@ def _thread_excepthook(args) -> None:
     try:
         if args.exc_type is not SystemExit and args.exc_value is not None:
             name = getattr(args.thread, "name", None) or "unknown"
-            _enqueue_failure("uncaught", "thread", name, args.exc_value, None, "", None, None, None, None)
+            _tell_user_of_uncaught(
+                _enqueue_failure("uncaught", "thread", name, args.exc_value, None, "", None, None, None, None))
     except Exception:
         pass
     (_prev_thread_hook or threading.__excepthook__)(args)
@@ -1406,9 +1533,9 @@ def asyncio_exception_handler(loop, context) -> None:
         exc = ctx.get("exception")
         message = str(ctx.get("message") or "")
         is_exc = isinstance(exc, BaseException)
-        _enqueue_failure("uncaught", "app", "asyncio", exc if is_exc else None,
-                         None if is_exc else "asyncio", message, None,
-                         {"message": message}, None, None)
+        _tell_user_of_uncaught(_enqueue_failure(
+            "uncaught", "app", "asyncio", exc if is_exc else None,
+            None if is_exc else "asyncio", message, None, {"message": message}, None, None))
     except Exception:
         pass
     try:
