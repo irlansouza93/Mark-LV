@@ -31,6 +31,10 @@ Quem usa o resultado:
 - Q: Onde o Irlan consulta o resumo de uso? → A: Só por comando no terminal (script em `tools/`), sem ferramenta de voz nem painel; cartões no HUD ficam para a spec 010.
 - Q: O JARVIS oferece registrar um relato sozinho quando uma ferramenta falha? → A: Não; só registra quando o Irlan pede ("não funcionou", "anota esse problema"). Sem regra nova no prompt.
 
+### Session 2026-10-17
+
+- Q: Uma exceção que escapa de um slot do Qt deve fechar o app (comportamento do PyQt6 com o hook padrão) ou ser registrada e o app seguir? → A: Registrar e seguir rodando (decisão do Irlan durante a implementação; consequência do `sys.excepthook` próprio).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Falhas ficam guardadas, agrupadas e sem segredos (Priority: P1)

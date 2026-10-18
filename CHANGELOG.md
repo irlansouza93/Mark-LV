@@ -16,6 +16,16 @@ PATCH a cada correção. Tags: `v55.x.y`.
   roteiro refeito com as specs de gestão pessoal.
 - Agentes do projeto por modelo (`lv-implementer` Sonnet, `lv-quick` Haiku, `lv-reviewer` Opus),
   skills `lv-validate`, `lv-new-skill` e `lv-triage`, hook de `py_compile` e hook de sessão na nuvem.
+- Spec 001 (em andamento): registro persistente de falhas em `logs/` (`core/errlog.py`,
+  `core/redact.py`) — console em `logs/jarvis.log`, falhas de ações, plugins, escada do Gemini e
+  sessão de voz em `logs/failures.jsonl` com assinatura, versão e filtro de segredos; linha no log
+  da tela quando a escada do Gemini esgota; primeira base de testes (`tests/`, `requirements-dev.txt`).
+
+### Changed
+- Exceção que escapa de um slot do Qt (ou de qualquer thread) não fecha mais o JARVIS: o
+  `sys.excepthook` próprio da spec 001 registra a falha em `logs/failures.jsonl`, imprime o
+  traceback como antes e o app segue rodando. Antes, o PyQt6 abortava o processo. Decidido pelo
+  Irlan em 2026-10-17.
 
 ## [55.1.0] — 2026-10-15
 
