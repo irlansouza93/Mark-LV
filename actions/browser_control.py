@@ -5,6 +5,7 @@ import asyncio
 import concurrent.futures
 import os
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -352,6 +353,61 @@ _SEARCH_ENGINES: dict[str, str] = {
     "yandex":     "https://yandex.com/search/?text=",
 }
 
+# Every action browser_control() handles — the names in the TOOL declaration.
+_ACTIONS = (
+    "go_to", "search", "click", "type", "scroll", "fill_form", "smart_click",
+    "smart_type", "get_text", "get_url", "press", "new_tab", "close_tab",
+    "screenshot", "back", "forward", "reload", "switch", "list_browsers",
+    "close", "close_all",
+)
+
+# Names the model reaches for instead of the declared ones ("open_tab" was seen
+# live on 2026-10-17). Mapping them costs nothing per connection; listing them in
+# the declaration would cost tokens on every one.
+_ACTION_ALIASES: dict[str, str] = {
+    "open_tab": "new_tab", "open_new_tab": "new_tab", "newtab": "new_tab",
+    "navigate": "go_to", "open_url": "go_to", "goto": "go_to",
+    "type_text": "type",
+}
+
+
+def _canonical_action(raw: str) -> str:
+    a = (raw or "").lower().strip().replace("-", "_").replace(" ", "_")
+    return _ACTION_ALIASES.get(a, a)
+
+
+_INPUT_TAG = re.compile(r"^input(?=[\[#.:]|$)")
+
+
+def _widen_selector(selector: str) -> str:
+    """`selector`, also allowed to match a <textarea> when it names an <input>.
+
+    The model's idea of a site's markup is older than the site: Google's search
+    box became a <textarea name=q> in 2023 and `input[name=q]` matches nothing,
+    which used to hang 30 s in Locator.clear. `:is(input,textarea)…` still
+    matches the input the selector meant, so nothing that worked changes. A
+    selector list is left alone rather than rewritten.
+    """
+    sel = selector.strip()
+    if "," in sel or not _INPUT_TAG.match(sel):
+        return selector
+    return ":is(input,textarea)" + sel[len("input"):]
+
+
+async def _find_field(page: Page, selector: str):
+    """First visible element for `selector` (widened as above), or None.
+
+    Waits up to 5 s — the page may still be loading — instead of the 30 s
+    default, and turns "not there" into an answer instead of a timeout.
+    """
+    loc = page.locator(_widen_selector(selector)).first
+    try:
+        await loc.wait_for(state="visible", timeout=5_000)
+        return loc
+    except PlaywrightTimeout:
+        return None
+
+
 _MAC_APP_NAMES: dict[str, str] = {
     "chrome":  "Google Chrome",
     "edge":    "Microsoft Edge",
@@ -687,9 +743,15 @@ class _BrowserSession:
                         clear_first: bool = True) -> str:
         page = await self._get_page()
         try:
-            el = page.locator(selector).first if selector else page.locator(":focus")
+            if selector:
+                el = await _find_field(page, selector)
+                if el is None:
+                    return (f"No visible field matches '{selector}'. "
+                            f"Try smart_type with a description of the field.")
+            else:
+                el = page.locator(":focus")
             if clear_first:
-                await el.clear()
+                await el.clear(timeout=8_000)
             await el.type(text, delay=50)
             return "Text typed."
         except Exception as e:
@@ -729,8 +791,11 @@ class _BrowserSession:
         results = []
         for selector, value in fields.items():
             try:
-                el = page.locator(selector).first
-                await el.clear()
+                el = await _find_field(page, selector)
+                if el is None:
+                    results.append(f"✗ {selector}: not found")
+                    continue
+                await el.clear(timeout=8_000)
                 await el.type(str(value), delay=40)
                 results.append(f"✓ {selector}")
             except Exception as e:
@@ -930,9 +995,17 @@ def browser_control(
     session_memory=None,
 ) -> str:
     params  = parameters or {}
-    action  = params.get("action", "").lower().strip()
+    action  = _canonical_action(params.get("action", ""))
     browser = params.get("browser", "").lower().strip() or None
     result  = "Unknown action."
+
+    # Checked before anything starts: an unknown name used to launch the
+    # automation browser and reload the last page, only to fail afterwards.
+    if action not in _ACTIONS:
+        result = (f"Unknown browser action: '{params.get('action', '')}'. "
+                  f"Use one of: {', '.join(_ACTIONS)}.")
+        _log(player, result)
+        return result
 
     if action == "switch":
         target = browser or params.get("target", "").lower().strip()

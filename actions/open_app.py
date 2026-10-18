@@ -1,3 +1,5 @@
+import os
+import re
 import time
 import subprocess
 import platform
@@ -75,7 +77,27 @@ def _normalize(raw: str) -> str:
         if alias_key in key or key in alias_key:
             return os_map.get(_SYSTEM, raw)
 
-    return raw  
+    return raw
+
+
+_WIN_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def _file_path_of(name: str) -> str | None:
+    """The filesystem path `name` names, or None when it is an app name or URI.
+
+    Only absolute paths count (drive letter, UNC, `/`, `~`): a bare relative
+    name is far more often an app ("notepad.exe") than a file in whatever
+    directory JARVIS happened to start in. The Windows forms are recognised on
+    every OS so a test on Linux sees the same thing the user does.
+    """
+    raw = name.strip().strip('"').strip("'")
+    if "://" in raw:
+        return None
+    if _WIN_ABS_PATH.match(raw) or raw.startswith(("/", "~")):
+        return os.path.expandvars(os.path.expanduser(raw))
+    return None
+
 
 def _launch_windows(app_name: str) -> bool:
 
@@ -251,6 +273,14 @@ def open_app(
     launcher = _OS_LAUNCHERS.get(_SYSTEM)
     if launcher is None:
         return f"Unsupported operating system: {_SYSTEM}"
+
+    # A path to a file that is not there would otherwise be "opened": the drive
+    # colon sends it down the `start <name>` branch, and `start` returns before
+    # Windows shows its own "cannot find" dialog — seen in the real app as
+    # "Opened C:\não\arquivo_existe.txt." for a file that never existed.
+    path = _file_path_of(app_name)
+    if path is not None and not os.path.exists(path):
+        return f"The file {app_name} does not exist."
 
     normalized = _normalize(app_name)
     print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")

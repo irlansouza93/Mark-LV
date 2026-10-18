@@ -75,6 +75,7 @@ from memory.config_manager     import (
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core                     import gemini as _gemini
+from core                     import live_session as _live
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
@@ -1423,8 +1424,11 @@ class JarvisLive:
             
             if not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
+                # put_or_drop, not put_nowait: during a network drop the sender
+                # is stuck on a dead socket and a full queue raised QueueFull
+                # inside the event loop (see core/live_session.put_or_drop).
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
+                    _live.put_or_drop, self.out_queue,
                     {"data": data, "mime_type": "audio/pcm"}
                 )
                 # Feed the live mic level to the HUD so the waveform reacts to
@@ -2381,20 +2385,20 @@ class JarvisLive:
                 # same dead handle would be replayed on every retry and the
                 # assistant would never come back at all: the feature meant to
                 # survive a reconnect would be the thing preventing one. Drop it
-                # once and let the next attempt start clean.
-                if _resumed_with and (
-                    "resum" in str(e).lower()
-                    or "handle" in str(e).lower()
-                    or "INVALID_ARGUMENT" in str(e)
-                    or "NOT_FOUND" in str(e)
-                ):
+                # once and let the next attempt start clean. Decided on the
+                # leaves of the TaskGroup's exception group, never its own text:
+                # "unhandled errors in a TaskGroup" contains "handle", and a
+                # network drop must keep the handle (core/live_session.py).
+                if _resumed_with and _live.is_resume_rejected(e):
                     print("[JARVIS] 🔗 Resumption handle rejected — starting a fresh session")
                     self.ui.write_log("SYS: Could not restore the conversation — starting fresh.")
                     self._resume_handle = None
                     self._conn_backoff = 0
                     continue
 
-                err_str = str(e)
+                # The group's own text hides the real failure; error_text adds
+                # each leaf so the quota / key / network tests below can see it.
+                err_str = _live.error_text(e)
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
 
@@ -2457,10 +2461,7 @@ class JarvisLive:
                     continue
 
                 # Network / timeout errors — log clearly and back off
-                is_net_err = any(k in err_str for k in (
-                    "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
-                    "ConnectionRefusedError", "OSError", "Cannot connect",
-                ))
+                is_net_err = _live.is_network_error(e)
                 if is_net_err:
                     _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
                     self._conn_backoff = _conn_backoff
