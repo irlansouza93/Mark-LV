@@ -79,6 +79,7 @@ from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
+from core                      import errlog
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
@@ -2250,6 +2251,7 @@ class JarvisLive:
             log  = self.ui.write_log,
         )
         set_trim_notifier(self.ui.write_log)
+        errlog.bind(notify=self.ui.write_log, transcript=lambda: list(self._session_log[-6:]))
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
@@ -2487,6 +2489,7 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
+    errlog.setup()
     ui = JarvisUI("face.png")
 
     def runner():
