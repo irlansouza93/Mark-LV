@@ -42,6 +42,7 @@ caracteres (`traceback` em 8 000), com `…[+N chars]` no fim.
 | Campo | Tipo | Regra |
 |---|---|---|
 | `kind` | const | `report` |
+| `source` | enum | `tool` (o modelo chamou `report_problem`) · `auto` (gatilho na fala do usuário, FR-019b) |
 | `expected` | str | o que o usuário esperava, nas palavras dele (obrigatório; vazio → `"(not said)"`) |
 | `happened` | str \| null | o que deu errado, na descrição do modelo/usuário |
 | `transcript` | list[str] | últimas ~3 trocas (≤ 6 linhas `User: …` / `<Asst>: …`), cada uma cortada |

@@ -35,6 +35,10 @@ Quem usa o resultado:
 
 - Q: Uma exceção que escapa de um slot do Qt deve fechar o app (comportamento do PyQt6 com o hook padrão) ou ser registrada e o app seguir? → A: Registrar e seguir rodando (decisão do Irlan durante a implementação; consequência do `sys.excepthook` próprio).
 
+### Session 2026-10-18
+
+- Q: Duas rodadas de voz real mostraram que o modelo anota o "não funcionou" só em parte das vezes (2 de 4 na 2ª rodada): quando a frase traz "eu queria X", ele faz X e esquece de anotar. Como garantir o relato? → A: Detectar no código, sem depender do modelo: quando a fala do Irlan no turno contém "não funcionou", "não deu certo" ou "deu errado", o JARVIS grava o relato sozinho (a frase dele como expectativa, a transcrição e as últimas ferramentas) e mostra uma linha curta no log da tela. A ferramenta `report_problem` continua para "anota esse problema" e para quando o modelo pergunta e completa a expectativa; relato automático e da ferramenta no mesmo turno viram um só. Sem regra nova no prompt (decisão do Irlan).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Falhas ficam guardadas, agrupadas e sem segredos (Priority: P1)
@@ -249,6 +253,12 @@ o modelo escolhe a ferramenta e confirma em voz.
 - **FR-019a**: `report_problem` é chamado só quando o usuário pede ("não funcionou", "anota esse
   problema" e equivalentes); o JARVIS NÃO oferece registrar por conta própria e o prompt do
   sistema não ganha regra nova para isso — a própria declaração da ferramenta basta.
+- **FR-019b**: Além da ferramenta, o JARVIS DEVE gravar um relato **automático** (sem depender do
+  modelo) quando a fala do usuário num turno contém "não funcionou", "não deu certo" ou "deu
+  errado" (com e sem acento; também "didn't work"/"did not work"), com a frase do usuário como
+  expectativa, a transcrição e as últimas ferramentas, e mostrar uma linha curta no log da tela
+  confirmando. Se a ferramenta `report_problem` já registrou no mesmo turno, o automático não
+  duplica. Todo relato diz a origem (`tool` ou `auto`). Decidido em 2026-10-18 (Clarifications).
 
 **Testes e escopo**
 
@@ -294,7 +304,8 @@ o modelo escolhe a ferramenta e confirma em voz.
 - **SC-006**: Registrar não acrescenta atraso perceptível: a parte feita na thread de quem chama
   leva menos de 1 ms por registro (medido), e o HUD segue abaixo de 15 ms/quadro.
 - **SC-007**: Dizer "não funcionou, eu queria X" numa sessão real resulta em um relato gravado com
-  X em pelo menos 4 de 5 tentativas, com confirmação em voz.
+  X em pelo menos 4 de 5 tentativas, com confirmação (em voz pela ferramenta ou pela linha no log
+  da tela do relato automático, FR-019b).
 - **SC-008**: O log de texto e o registro de falhas não passam do limite de tamanho definido mesmo
   com um plugin falhando em loop por 10 minutos; registros de uso com mais de 12 meses não existem
   em `logs/`.
