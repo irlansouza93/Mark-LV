@@ -73,6 +73,47 @@ continua ✅ — o desenho não acrescentou dependência nem arquivo do upstream
 
 Nenhuma regra nova no prompt do sistema (clarify Q5). Medida: nome + descrições + nomes de parâmetros somados; o texto continua dentro de 300 (265): +86 caracteres sobre a primeira redação, a troca de custo por um modelo que anota em vez de só resolver.
 
+## Medições (T040, 2026-10-18)
+
+Tudo medido na máquina do Irlan (notebook com RTX 3050 + Intel UHD), Python 3.14 do `.venv`, na
+thread **de quem chama** (a que importa: loop de áudio, Qt, executor de ferramentas). Os
+scripts ficam no scratchpad e não são versionados; os testes de `tests/` guardam limites
+folgados dos mesmos números (SC-006: p95 < 1 ms).
+
+| O que | n | p50 | p95 | p99 | pior |
+|---|---|---|---|---|---|
+| `record_failure(exc=<KeyError real, com traceback>)` | 10 000 | 1,3 µs | 2,8 µs | 4,6 µs | 3,07 ms |
+| `record_oneshot(modelo, tier, "ok", ms, usage)` | 10 000 | 0,6 µs | 0,9 µs | 1,5 µs | 0,12 ms |
+| `live_message`: pedaço de áudio (sem uso, sem transcrição) | 8 000 | 0,2 µs | 0,3 µs | 0,3 µs | 6,7 µs |
+| `live_message`: pedaço de transcrição (usuário + assistente) | 8 000 | 0,9 µs | 1,0 µs | 1,3 µs | 46 µs |
+| `live_message`: só `usage_metadata` | 8 000 | 1,2 µs | 1,9 µs | 2,3 µs | 3,9 ms |
+| `live_message`: `usage_metadata` + `turn_complete` | 8 000 | 1,3 µs | 1,6 µs | 2,4 µs | 0,16 ms |
+| `live_message`: `turn_complete`, frase comum (sem gatilho) | 1 500 | 6,1 µs | 7,3 µs | 24 µs | — |
+| `live_message`: `turn_complete` com gatilho (relato automático enfileirado) | 1 500 | 8,3 µs | 10,7 µs | 36 µs | — |
+| `live_message`: `turn_complete` sem fala do usuário | 1 500 | 1,8 µs | 2,2 µs | 14 µs | — |
+| handler de `report_problem` (transcrição de 8 linhas, 8 ferramentas) | 2 000 | 1,8 µs | 2,8 µs | 10,7 µs | 0,029 ms |
+
+**HUD com a escrita de logs ativa** (`tools/hud_bench.py --style holo --size 700 --frames 400`,
+`GL_RENDERER` = **NVIDIA GeForce RTX 3050 6GB Laptop GPU/PCIe/SSE2**, confirmado no log do bench;
+uma thread paralela gerando ~2 400 registros/s — falha com traceback, uso e linha de console —
+muito acima de qualquer coisa que o app produz):
+
+| | mediana | p95 | pior quadro | orçamento |
+|---|---|---|---|---|
+| sem registro em paralelo | 3,3–3,4 ms | 3,9–4,2 ms | 5,7–8,9 ms | 15 ms |
+| com registro em paralelo | 4,7 ms | 5,6 ms | 7,3–8,3 ms | 15 ms |
+
+O registro intenso custa ~1,4 ms de mediana ao HUD e fica a 2,7× do orçamento no p95.
+
+**Os picos de 3–4 ms.** Aparecem, isolados (1 em milhares), quando a thread de escrita está no
+meio de um registro: ela é Python puro (formatar traceback, filtro de segredos, JSON, arquivo) e
+segura o GIL; quem chama só precisa de ~1 µs, mas se tenta pegar o GIL nesse instante espera a
+troca de contexto, que o CPython só faz a cada 5 ms (`sys.getswitchinterval()`) — daí os 3–4 ms
+(o pior visto foi 3,9 ms). Não atrapalham porque o áudio é entregue em fatias de 50 ms (2 400
+bytes a 24 kHz, `main.py`) com a fila do reprodutor à frente, então um atraso de 4 ms de uma
+mensagem não esvazia nada; e porque são raros (o p99 de todos os caminhos é ≤ 36 µs). O HUD, que
+é o mais sensível (15 ms por quadro), teve pior quadro de 9,7 ms no pior dos testes.
+
 ## Project Structure
 
 ### Documentation (this feature)
