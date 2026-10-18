@@ -18,8 +18,12 @@ small lists and queues one dict. The failures lookup, the secret filter and the 
 happen on the log writer thread (core/errlog.py).
 
 Declaration cost (constitution VI): see "Custo de tokens" in specs/001-error-log-llm-usage/plan.md.
-Called only when the user says something went wrong (the system prompt is deliberately not
-changed). The wording of the description is the product here: the first voice test (T039,
+Called when the user says something went wrong (the system prompt is deliberately not
+changed). The model does not do this reliably (2 of 4 in the second voice round), so
+errlog.end_turn() ALSO writes an automatic report (source "auto") whenever the user's words
+contain "não funcionou" and friends; a report the tool wrote in the same turn prevents the
+duplicate. This tool stays for "anota esse problema" and for the expectation the user gives
+after the model asks. The wording of the description is the product here: the first voice test (T039,
 2026-10-17) showed the model preferring to fix the problem over writing it down, so the
 description now says "call FIRST, then try to fix it" and names the phrases in Portuguese.
 """

@@ -40,6 +40,7 @@ import threading
 import time
 import traceback
 import types
+import unicodedata
 import uuid
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -1162,14 +1163,57 @@ def note_speech(user=None, assistant=None) -> None:
         pass
 
 
-def end_turn() -> None:
-    """The turn is complete (main.py has logged it) or the voice session changed: drop the draft."""
+def discard_turn() -> None:
+    """Forget the turn in progress without judging it (a new voice session, shutdown)."""
+    global _tool_reported
     try:
         _turn_user.clear()
         _turn_assistant.clear()
         _turn_chars["u"] = _turn_chars["a"] = 0
+        _tool_reported = False
     except Exception:
         pass
+
+
+# The automatic report (spec FR-019b, decided 2026-10-18). Two voice rounds showed the model
+# writes the "it did not work" report only some of the time: when the sentence also says what
+# the user wanted ("não funcionou, eu queria o Excel") it goes and does that instead (2 of 4
+# noted in round 2). So the CODE listens: when a turn ends and what the user said contains one
+# of these phrases, the report is written without the model. False positives are accepted; triage
+# discards them. Matched on whole words after lower-casing and stripping accents, so "Não
+# funcionou", "NAO FUNCIONOU" and "nao funcionou" are the same.
+_PROBLEM_RX = re.compile(
+    r"\b(?:nao\s+funcionou|nao\s+deu\s+certo|deu\s+errado|didn'?t\s+work|did\s+not\s+work)\b")
+
+
+def _fold(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text.replace("’", "'").replace("‘", "'"))
+    return "".join(c for c in text if not unicodedata.combining(c)).casefold()
+
+
+def problem_trigger(text) -> bool:
+    """Does what the user said report that something did not work? Pure; never raises."""
+    try:
+        return isinstance(text, str) and bool(_PROBLEM_RX.search(_fold(text[:_TURN_CAP])))
+    except Exception:
+        return False
+
+
+_tool_reported = False        # the report_problem tool already wrote a report during this turn
+
+
+def end_turn() -> None:
+    """The turn is complete (main.py is about to log it): if the user's words in it reported a
+    problem, write the automatic report now; then drop the draft. Runs on the audio thread, so
+    it is one regex over a short string and one queue put — nothing else."""
+    try:
+        said = " ".join(list(_turn_user)).strip()
+        if said and not _tool_reported and problem_trigger(said):
+            if _queue_report(said, None, "auto") is None:
+                notify_once("auto_report", "SYS: Problem noted for triage.", every_s=20)
+    except Exception:
+        pass
+    discard_turn()
 
 
 def _turn_in_progress() -> list:
@@ -1184,13 +1228,24 @@ def _turn_in_progress() -> list:
 
 
 def record_report(expected, happened=None) -> str | None:
-    """Queue a user's "it did not work" report for logs/reports.jsonl, with the last lines of
-    the conversation (the provider bound by ``bind(transcript=…)``), the last 8 tools run and
-    the failures of the last 10 minutes. Only this path ever stores the conversation.
+    """Queue a report made by the ``report_problem`` tool (``source: "tool"``) for
+    logs/reports.jsonl. Returns None when queued, or a short reason (never raises). It also
+    tells ``end_turn`` that this turn already has its report, so the automatic one is not
+    written twice."""
+    global _tool_reported
+    reason = _queue_report(expected, happened, "tool")
+    if reason is None:
+        _tool_reported = True
+    return reason
+
+
+def _queue_report(expected, happened, source: str) -> str | None:
+    """The report with the last lines of the conversation (the provider bound by
+    ``bind(transcript=…)`` plus the turn in progress), the last 8 tools run and the failures
+    of the last 10 minutes. Only reports ever store the conversation.
 
     Instant: copies a few small lists and puts one dict on the queue; the failures, the
-    secret filter and the disk are the writer's. Returns None when queued, or a short reason
-    when it could not be (never raises)."""
+    secret filter and the disk are the writer's."""
     try:
         lines: list = []
         provider = _transcript
@@ -1203,7 +1258,7 @@ def record_report(expected, happened=None) -> str | None:
         lines = (lines + _turn_in_progress())[-_REPORT_TRANSCRIPT_LINES:]    # + the sentence still being spoken
         said = str(expected).strip() if expected is not None else ""
         went_wrong = str(happened).strip() if happened is not None else ""
-        return _enqueue("reports", {"kind": "report", "expected": said or "(not said)",
+        return _enqueue("reports", {"kind": "report", "source": source, "expected": said or "(not said)",
                                     "happened": went_wrong or None, "transcript": lines,
                                     "recent_tools": _recent_tools(), "_finalize": _fin_report})
     except Exception as e:
@@ -1432,7 +1487,7 @@ def _shutdown_locked() -> None:
     _recent_failures.clear()
     _burst.__init__()
     _tools.clear()
-    end_turn()
+    discard_turn()
     _notified.clear()
     _live_attempts = 0
     _dir = _q = _thread = None

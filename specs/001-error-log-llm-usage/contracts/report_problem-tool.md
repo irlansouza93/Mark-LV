@@ -70,3 +70,43 @@ Além disso, os dois relatos gravados vieram **sem a frase que os disparou** na 
 turno em andamento ainda não estava no `_session_log`). Correções feitas: `errlog.note_speech`
 guarda as transcrições do turno corrente e `record_report` as acrescenta, e a descrição foi
 reescrita (acima). A 2ª rodada repete os casos 1, 2 e 1 de novo.
+
+### Resultado da 2ª rodada (2026-10-18, voz real, descrição "Call FIRST…" + frase em andamento)
+
+A frase em andamento (`User (now): …`) já aparece no relato: a correção da 1ª rodada funcionou.
+O modelo, porém, anotou só **2 de 4**:
+
+| Fala | Resultado |
+|---|---|
+| "Não funcionou, eu queria o Excel" | **não anotou**: abriu o LibreOffice |
+| "Não funcionou." | anotou, mas **deduziu** a expectativa em vez de perguntar |
+| "Não deu certo, eu queria ver a previsão" | **não anotou**: mostrou o tempo |
+| "Deu errado aqui, ia abrir seu YouTube" | anotou |
+
+Quando a frase traz "eu queria X", o modelo faz X e esquece de anotar; reescrever a declaração não
+resolve de forma confiável. Decisão do Irlan (2026-10-18, spec FR-019b): o **código** grava o
+relato.
+
+## Relato automático (FR-019b)
+
+Não depende do modelo e não muda o prompt do sistema nem a declaração (continua 265 caracteres).
+
+- **Gatilho:** em `errlog.end_turn()`, chamado por `llm_usage.live_message` no `turn_complete`,
+  sobre a fala do **usuário** acumulada no turno (a do assistente não conta). O texto é normalizado
+  (minúsculas, sem acento, `’` → `'`) e casado por palavra inteira com
+  `\b(?:nao\s+funcionou|nao\s+deu\s+certo|deu\s+errado|didn'?t\s+work|did\s+not\s+work)\b`
+  (`errlog.problem_trigger`). "funcionou", "deu certo", "não funciona" e "vai dar errado" não casam.
+  Falsos positivos são aceitos; a triagem os descarta.
+- **Relato:** `source: "auto"`, `expected` = a frase do usuário (cortada em 500), `happened: null`,
+  a transcrição **incluindo o turno que fecha** (`User (now): …`, `Assistant (now): …`, até 6
+  linhas) e as últimas 8 ferramentas; as falhas dos últimos 10 min entram como em qualquer relato.
+- **Confirmação:** `notify_once("auto_report", "SYS: Problem noted for triage.", every_s=20)` no
+  log da tela (uma vez a cada 20 s, mesmo que haja vários relatos).
+- **Sem duplicar:** se a ferramenta `report_problem` gravou relato **no mesmo turno**, o
+  automático não grava. Relato da ferramenta em turno **seguinte** (o modelo perguntou e o
+  usuário completou a expectativa) é mantido como relato separado. Todo relato da ferramenta
+  leva `source: "tool"`.
+- **Custo no caminho do áudio:** no `turn_complete`, uma normalização + um regex sobre texto curto
+  e um `put` na fila (medido: p50 8 µs, p95 11 µs com gatilho; 6 µs sem; 2 µs sem fala).
+- **O que continua com a ferramenta:** "anota esse problema: …" e a expectativa completada depois
+  de o modelo perguntar.

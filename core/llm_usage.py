@@ -410,7 +410,7 @@ def _fin_session_start(rec: dict, ts: float) -> dict:
 
 def live_session_start(model: str, voice: str, resumed: bool) -> None:
     """A voice session connected (one record; ``resumed`` = it restored the conversation)."""
-    errlog.end_turn()                                   # a half-heard sentence of the old connection is not this one's
+    errlog.discard_turn()                               # a half-heard sentence of the old connection is not this one's
     try:
         errlog._enqueue("usage", {"kind": "live_session", "provider": "gemini", "event": "start",
                                   "_model": model, "voice": voice, "resumed": bool(resumed),

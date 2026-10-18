@@ -49,7 +49,7 @@ caracteres (`traceback` em 8 000), com `…[+N chars]` no fim.
 | `recent_tools` | list[obj] | últimas 8: `{ts, name, args, result, soft_failure: bool}` |
 | `recent_failures` | list[obj] | falhas dos últimos 10 min: `{ts, signature, component, name, error_type}` |
 
-Falhas automáticas **nunca** têm `transcript` (FR-017).
+Falhas automáticas **nunca** têm `transcript` (FR-017). O relato `auto` (FR-019b) não é uma falha: é um relato do usuário detectado pelo código, e leva a transcrição como qualquer relato.
 
 ## UsageRecord — `logs/usage-YYYY-MM.jsonl`
 
