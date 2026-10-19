@@ -57,6 +57,31 @@ nenhum agente faz commit, push ou PR — isso é da sessão principal, com o usu
 - **SessionStart** → `.claude/hooks/session-start.sh`: em sessão na nuvem, instala o PowerShell 7
   (os scripts do Spec Kit são `.ps1`). Na máquina local não faz nada.
 
+## Economia de tokens (decidido em 2026-10-19)
+
+O limite do plano acaba por conversa longa, não por código difícil: cada mensagem relê todo o
+histórico da sessão. Regras para todo trabalho neste repositório:
+
+1. **Uma sessão por spec ou tarefa.** Fechou o ciclo (spec mesclada, fix mesclado), encerre a sessão.
+   A próxima começa do zero com um **prompt curto** que aponta para os docs; nunca recole histórico.
+   A memória do projeto está em `docs/VISAO.md`, `docs/conversas/` e `specs/`, não no chat.
+2. **Conversa ficou longa?** Use `/compact` ou abra uma sessão nova com um resumo de 5 linhas.
+3. **Sem cadeia de sessões.** Abra a sessão da feature direto e converse com ela. Uma sessão "mãe"
+   que recebe cada relato das filhas paga a releitura do próprio histórico a cada relato. Na spec
+   001, as rodadas de teste geraram dezenas de avisos na sessão de planejamento.
+4. **Navegar antes de ler.** `graphify query`/`explain`/`path` para entender o código; `grep`
+   pontual para achar uma linha; `Read` com `offset`/`limit`, nunca o `ui.py` (~6 mil linhas)
+   inteiro.
+5. **Modelo certo para cada trabalho** (tabela "Qual modelo faz o quê" acima): o modelo forte só
+   especifica, planeja e revisa; as tarefas do `tasks.md` vão para o `lv-implementer` (Sonnet), as
+   mecânicas para o `lv-quick` (Haiku) e as buscas amplas para o `Explore`, de onde só a conclusão
+   volta. Tarefa mecânica roda com esforço baixo.
+6. **Saída curta de comandos:** `pytest -q`, `| tail`, `--stat`; nunca despejar log inteiro.
+7. **Teste real em lote:** um único roteiro com todos os casos num turno só, em vez de várias rodadas
+   de ida e volta.
+8. **`CLAUDE.md` enxuto:** ele entra em toda sessão. Detalhe vai para `docs/`, com um link no
+   `CLAUDE.md`.
+
 ## Versão
 
 `55.MINOR.PATCH` (D6 da `VISAO.md`). Cada PR de feature acrescenta a entrada em

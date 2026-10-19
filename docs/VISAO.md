@@ -73,5 +73,6 @@ Kit numera na criação). Parecer e dependências de cada item em [`demandas.md`
 ## 6. Em aberto
 - **D12:** criar o projeto Google privado com cobrança e teto (passo do Irlan, quando a spec 004 estiver pronta); confirmar o teto inicial sugerido de US$ 5/mês.
 - **D10:** tetos mensais de DeepSeek e OpenAI e a validade dos créditos (conferir nos painéis); revisar depois de duas semanas de medição (spec 001). **A medição começou em 2026-10-17** (`tools/usage_report.py`); primeiro dado: o Live reenvia ~17 mil tokens fixos de texto por turno, ≈ US$ 0,009–0,024 por turno se fosse pago (7 turnos, sessão de 3,5 min).
+- **Dieta do prompt do Live (candidata a spec):** os ~17 mil tokens fixos reenviados a cada turno de voz (medidos na spec 001) são o maior custo da voz e o que mais consome a cota grátis. Enxugar `core/prompt.txt`, o núcleo da memória e as declarações de ferramentas antes do modo privado (D12, spec 004).
 - **D11:** bases e campos de cada área no Notion (tarefas, rotinas, cursos, finanças) — levantar no `/speckit-clarify` da spec 007.
 - Criar as tags `v55.0.0` (base do upstream) e `v55.1.0` (trabalho do fork até `a56cb2a`) e enviá-las ao `origin` — aguardando confirmação.
