@@ -24,6 +24,7 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
   - UI/HUD: `tools/hud_bench.py --style <estilo> --out <png>` renderiza offscreen, salva o quadro e mede ms/quadro (alvo p95 < 15 ms — o HUD pinta a 20–30 Hz); olhe a imagem;
   - Gemini: chamadas reais usam a chave de `config/api_keys.json` e precisam rodar fora do sandbox.
 - Erros e relatos do JARVIS → skill **`lv-triage`** para virar fix ou spec. Nova habilidade do JARVIS → skill **`lv-new-skill`**.
+- **Economia de tokens** (regras em [`docs/HARNESS.md`](docs/HARNESS.md#economia-de-tokens-decidido-em-2026-10-19)): uma sessão por spec/tarefa; `graphify query` antes de ler arquivos; tarefas planejadas no `lv-implementer` (Sonnet), mecânicas no `lv-quick` (Haiku); saída de comandos curta; teste real em um único roteiro.
 
 ## Mapa do código
 | Onde | O quê |
