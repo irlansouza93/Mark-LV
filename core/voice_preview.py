@@ -25,10 +25,12 @@ from __future__ import annotations
 import io
 import re
 import threading
+import time
 import wave
 from pathlib import Path
 
 import numpy as np
+from core import llm_usage
 
 _BASE = Path(__file__).resolve().parent.parent
 CACHE_DIR = _BASE / "config" / "voice_cache"
@@ -137,16 +139,20 @@ def _synthesise(voice: str, lang: str) -> tuple[np.ndarray, int]:
     )
     last = "no TTS model answered"
     for model in TTS_MODELS:
+        t0, r = time.monotonic(), None
         try:
             r = cl.models.generate_content(
                 model=model,
                 contents=f"Say this warmly and naturally, like a friend: {text}",
                 config=cfg)
+            llm_usage.record_tts(model, "ok", int((time.monotonic() - t0) * 1000), getattr(r, "usage_metadata", None))
             part = r.candidates[0].content.parts[0].inline_data
             if part and part.data:
                 return _decode(part.data, part.mime_type or "")
             last = f"{model}: empty audio"
         except Exception as e:           # quota / 404 / timeout → next rung
+            if r is None:                # the call failed (a bad reply after a billed one is not a second use)
+                llm_usage.record_tts(model, llm_usage.result_of(e), int((time.monotonic() - t0) * 1000))
             last = f"{model}: {str(e)[:120]}"
     raise RuntimeError(last)
 

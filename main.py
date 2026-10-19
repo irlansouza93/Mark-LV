@@ -79,6 +79,8 @@ from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
+from core                      import errlog
+from core                      import llm_usage
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
@@ -1319,12 +1321,14 @@ class JarvisLive:
 
         except Exception as e:
             result = f"Tool '{name}' failed: {e}"
+            errlog.record_failure("inline_tool", name, exc=e, phase="run", context={"args": args})
             traceback.print_exc()
             self.speak_error(name, e)
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
+        errlog.note_tool(name, args, result)
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
 
         # A tool that declared itself NON_BLOCKING also says when its answer may
@@ -1656,6 +1660,7 @@ class JarvisLive:
         try:
             while True:
                 async for response in self.session.receive():
+                    llm_usage.live_message(response)
 
                     # ── Session resumption ───────────────────────────────────
                     # The server sends this periodically. `resumable` goes false
@@ -2250,6 +2255,8 @@ class JarvisLive:
             log  = self.ui.write_log,
         )
         set_trim_notifier(self.ui.write_log)
+        errlog.bind(notify=self.ui.write_log, transcript=lambda: list(self._session_log[-6:]))
+        asyncio.get_running_loop().set_exception_handler(errlog.asyncio_exception_handler)
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
@@ -2274,6 +2281,7 @@ class JarvisLive:
 
         while True:
             try:
+                _end_reason, _end_ts, _connected, _resumed_with = "shutdown", None, False, False
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
                 # Pick the rung to open the conversation on. A model resting
@@ -2313,6 +2321,9 @@ class JarvisLive:
                     self._interrupted          = False
 
                     print("[JARVIS] Connected.")
+                    _connected = True
+                    errlog.new_live_session()
+                    llm_usage.live_session_start(live_model, get_voice(), _resumed_with)
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
@@ -2369,12 +2380,20 @@ class JarvisLive:
                 # session immediately with no backoff and no scary logs.
                 if _is_reconnect_signal(e):
                     print("[JARVIS] Voluntary reconnect requested.")
+                    _end_reason, _end_ts = "voluntary", time.time()
                     if not _keep_context_of(e):
                         # A deliberate clean slate (voice change) — drop the
                         # handle so the next connect really does start empty.
                         self._resume_handle = None
                     self._conn_backoff = 0
                     continue
+
+                _end_reason, _end_ts = "error", time.time()
+                errlog.record_failure("live", "live_connect", exc=e, phase="receive" if _connected else ("resume" if _resumed_with else "connect"),
+                                      context={"model": LIVE_MODEL, "voice": get_voice(), "resumed": _resumed_with,
+                                               "attempt": errlog.next_live_attempt(),
+                                               "backoff_s": getattr(self, "_conn_backoff", 3),
+                                               "classified": errlog.classify_live_error(e, _resumed_with)})
 
                 # A resumption handle the server will not accept — expired, or
                 # belonging to a session it has since dropped. Without this, the
@@ -2471,6 +2490,8 @@ class JarvisLive:
                 else:
                     self._conn_backoff = 3
             finally:
+                llm_usage.live_session_end(_end_reason, _end_ts)
+                errlog.set_live_session(None)
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
                 if len(self._session_log) >= 3:
@@ -2487,6 +2508,7 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
+    errlog.setup()
     ui = JarvisUI("face.png")
 
     def runner():

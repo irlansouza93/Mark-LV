@@ -20,7 +20,7 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
 - Ambiente: `.venv/` (Python 3.14). Rodar: `.venv/Scripts/python.exe main.py`. Instalar deps: `python setup.py`.
 - Verificação: skill **`lv-validate`** (passo a passo). Em resumo:
   - `py_compile` em tudo que mudou (o hook `PostToolUse` já compila cada `.py` editado);
-  - lógica sem interface: `pytest` em `tests/` (a base de testes chega com a spec 001);
+  - lógica sem interface: `pytest` em `tests/` (`pip install -r requirements-dev.txt` uma vez; `.venv/Scripts/python.exe -m pytest tests -q`, ~5 s, sem rede nem chave — Gemini, relógio e disco ficam atrás de funções que o teste troca);
   - UI/HUD: `tools/hud_bench.py --style <estilo> --out <png>` renderiza offscreen, salva o quadro e mede ms/quadro (alvo p95 < 15 ms — o HUD pinta a 20–30 Hz); olhe a imagem;
   - Gemini: chamadas reais usam a chave de `config/api_keys.json` e precisam rodar fora do sandbox.
 - Erros e relatos do JARVIS → skill **`lv-triage`** para virar fix ou spec. Nova habilidade do JARVIS → skill **`lv-new-skill`**.
@@ -41,12 +41,17 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
 | `core/avatar.py`, `core/avatar_mesh.py` | Animação/rig da cabeça e malha canônica do MediaPipe; o desenho chapado antigo fica só como fallback |
 | `core/gemini.py` | "Escada" de modelos para chamadas one-shot (cooldown por tipo de falha, timeout obrigatório). Toda chamada one-shot ao Gemini passa por aqui |
 | `core/voice_preview.py` | Amostras de voz para o seletor (TTS do Gemini, cache em `config/voice_cache/`) |
-| `actions/*.py` | Habilidades embutidas: cada arquivo expõe um dict `TOOL` com `handler` e é auto-descoberto por `core/action_loader.py` |
+| `core/errlog.py` | Registro em `logs/`: uma thread de escrita recebe dicts por fila (quem chama gasta ~1 µs). `jarvis.log` (console, via tee de stdout/stderr), `failures.jsonl` (assinatura, agrupamento, falha "mole", limite de rajada), `reports.jsonl` (relatos), `usage-*.jsonl`. `setup()`/`bind()` ligados no `main.py`; ganchos `record_failure`/`note_tool` nos loaders, em `core/gemini.py` e no `main.py` |
+| `core/redact.py` | Filtro de segredos aplicado a **todo** registro antes de ir ao disco (chaves de `api_keys.json`, formatos conhecidos, campos por nome) |
+| `core/llm_usage.py` | Uso de LLM e custo: tokens por modalidade, preço por tabela, medidor dos turnos de voz, resumo (`summarize`). `live_message(response)` roda em toda mensagem do Live — só lê atributos e enfileira |
+| `config/llm_prices.json` | Tabela de preços (US$/1M tokens, datada, com fonte); editar não exige código |
+| `actions/*.py` | Habilidades embutidas: cada arquivo expõe um dict `TOOL` com `handler` e é auto-descoberto por `core/action_loader.py`. `report_problem.py` grava o relato "não funcionou"; o relato **automático** (fala com "não funcionou"/"não deu certo"/"deu errado") é feito pelo `errlog.end_turn()` |
 | `plugins/*.py` | Plugins drop-in: dict `PLUGIN` + `run()` (ver `plugins/_template.py`), descobertos por `core/plugin_loader.py`, liga/desliga em 🧩 PLUGINS sem reiniciar |
 | `memory/config_manager.py` | Toda leitura/escrita de `config/api_keys.json` (flags, voz, estilo de HUD, dispositivos) |
 | `memory/memory_manager.py` | Memória de longo prazo (`memory/long_term.json`) + busca local `recall_memory` |
 | `dashboard/` | Controle remoto pelo celular (FastAPI + TLS próprio) |
-| `tools/` | Ferramentas de desenvolvimento do fork (não são do app): `hud_bench.py` mede e captura o HUD offscreen |
+| `tools/` | Ferramentas de desenvolvimento do fork (não são do app): `hud_bench.py` mede e captura o HUD offscreen; `usage_report.py` resume o uso de LLM (`--days N`, `--by`, `--json`) |
+| `tests/` | `pytest` da lógica sem interface (filtro de segredos, errlog, uso/custo, ganchos com SDK simulado). Nunca importam `main.py`/`ui.py`/`google.genai` nem usam rede |
 | `specs/`, `.specify/`, `docs/` | Specs por feature, Spec Kit (templates, scripts, constituição) e documentação do fork |
 
 ## Convenções do projeto (siga ao editar)
@@ -65,6 +70,10 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
 - O modelo Live **não** está na escada de `core/gemini.py` (modelos Live não são intercambiáveis); a voz é fixada na conexão — trocar voz reconstrói a sessão.
 - Notebook com Optimus (o do Irlan: RTX 3050 + Intel UHD): o OpenGL cai na GPU integrada por padrão; `core/holo_gpu._context` define `SHIM_MCCOMPAT` para usar a NVIDIA. Confira `GL_RENDERER` antes de medir desempenho.
 - O console do Windows pode não ser UTF-8: ao rodar scripts que imprimem emoji, use `PYTHONIOENCODING=utf-8`.
+- **O console agora também vai para `logs/jarvis.log`** (o `errlog` troca `sys.stdout`/`sys.stderr` por um tee): `print` novo já fica registrado, filtrado de segredos. Para erro de verdade, use `errlog.record_failure`.
+- Tudo o que o JARVIS registra — inclusive a **transcrição das falas nos relatos** — fica em `logs/`, legível e apagável à mão (Princípio VIII). No Windows só dá para apagar com o app fechado (o app mantém os arquivos abertos).
+- `shutdown_jarvis` termina com `os._exit(0)`: **pula `finally` e `atexit`**. Nada que precise ser gravado ao sair pode depender deles (foi por isso que sessões de voz ficaram sem registro de fim; o resumo estima a duração).
+- Um worktree não tem `config/api_keys.json` (fica fora do git): copie o do repositório principal para rodar o app nele.
 
 ## graphify
 

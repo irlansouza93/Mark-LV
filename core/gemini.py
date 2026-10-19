@@ -70,6 +70,7 @@ import sys
 import time
 import threading
 from pathlib import Path
+from core import errlog, llm_usage
 
 if getattr(sys, "frozen", False):
     _BASE = Path(sys.executable).parent
@@ -328,10 +329,11 @@ class _Reply:
     """What a Live turn hands back, shaped like the REST response's `.text` so
     every existing call site keeps working unchanged."""
 
-    __slots__ = ("text",)
+    __slots__ = ("text", "usage_metadata")
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, usage_metadata=None):
         self.text = text
+        self.usage_metadata = usage_metadata          # extra: what the Live session reported, for usage records
 
 
 def _live_model() -> str:
@@ -368,7 +370,7 @@ def _to_live_parts(contents) -> list:
     return parts
 
 
-async def _live_turn(parts: list, system: str, key: str, timeout_s: float) -> str:
+async def _live_turn(parts: list, system: str, key: str, timeout_s: float) -> tuple:
     from google import genai
     from google.genai import types as gtypes
 
@@ -394,9 +396,12 @@ async def _live_turn(parts: list, system: str, key: str, timeout_s: float) -> st
         await session.send_client_content(
             turns={"role": "user", "parts": parts}, turn_complete=True)
         chunks: list[str] = []
+        usage: list = []
 
         async def drain():
             async for resp in session.receive():
+                if getattr(resp, "usage_metadata", None) is not None:
+                    usage[:] = [resp.usage_metadata]
                 sc = getattr(resp, "server_content", None)
                 if sc and sc.output_transcription and sc.output_transcription.text:
                     chunks.append(sc.output_transcription.text)
@@ -409,7 +414,7 @@ async def _live_turn(parts: list, system: str, key: str, timeout_s: float) -> st
             await asyncio.wait_for(drain(), timeout=1.5)
         except asyncio.TimeoutError:
             pass
-        return "".join(chunks).strip()
+        return "".join(chunks).strip(), (usage[0] if usage else None)
     finally:
         try:
             await cm.__aexit__(None, None, None)
@@ -447,7 +452,7 @@ def _live_call(contents, config, timeout_ms: int, key: str):
 
     def runner():
         try:
-            box["text"] = asyncio.run(
+            box["text"], box["usage"] = asyncio.run(
                 _live_turn(parts, str(system), key, max(10.0, timeout_ms / 1000.0)))
         except BaseException as e:                     # noqa: BLE001
             box["error"] = e
@@ -461,7 +466,7 @@ def _live_call(contents, config, timeout_ms: int, key: str):
     if "error" in box:
         raise box["error"]
     text = box.get("text")
-    return _Reply(text) if text else None
+    return _Reply(text, box.get("usage")) if text else None
 
 
 def call(contents, tier: str = FAST, config=None,
@@ -486,15 +491,20 @@ def call(contents, tier: str = FAST, config=None,
     resolved_key = key or api_key()
     if not resolved_key:
         print("[Gemini] no Gemini API key is configured")
+        errlog.record_failure("gemini", "ladder", error_type="no_key", message="no Gemini API key is configured")
+        errlog.notify_once("nokey", "SYS: No Gemini API key is configured — side calls are off.", every_s=_COOLDOWN_SECONDS)
         return None
 
     cl = None
     tried = [m for m in ladder if not _cooling(m)] or list(ladder)
+    reasons = {}
     for model in tried:
+        t0 = time.monotonic()
         try:
             if model == LIVE:
                 reply = _live_call(contents, config, timeout_ms, resolved_key)
                 if reply is not None:
+                    llm_usage.record_oneshot(_live_model(), tier, "ok", int((time.monotonic() - t0) * 1000), getattr(reply, "usage_metadata", None))
                     return reply
                 raise RuntimeError("the Live turn came back empty")
             if cl is None:
@@ -502,22 +512,33 @@ def call(contents, tier: str = FAST, config=None,
             kwargs = {"model": model, "contents": contents}
             if config is not None:
                 kwargs["config"] = config
-            return cl.models.generate_content(**kwargs)
+            resp = cl.models.generate_content(**kwargs)
+            llm_usage.record_oneshot(model, tier, "ok", int((time.monotonic() - t0) * 1000), getattr(resp, "usage_metadata", None))
+            return resp
         except Exception as e:
             msg = str(e)
             if is_quota_error(msg):
                 _cool(model)
                 print(f"[Gemini] {model}: out of quota — skipping it for "
                       f"{_COOLDOWN_SECONDS // 60} minutes")
+                reason = "quota"
             elif is_gone_error(msg):
                 _cool(model, _GONE_SECONDS)
                 print(f"[Gemini] {model}: unavailable to this key — set aside")
+                reason = "gone"
             elif is_unavailable_error(msg):
                 _cool(model, _UNAVAILABLE_SECONDS)
                 print(f"[Gemini] {model}: not answering — resting it for "
                       f"{_UNAVAILABLE_SECONDS // 60} minutes")
+                reason = "unavailable"
             else:
                 print(f"[Gemini] {model}: {type(e).__name__}: {msg[:140]}")
+                reason = errlog.rung_failure_reason(e, msg)
+            reasons[model] = reason
+            llm_usage.record_oneshot(_live_model() if model == LIVE else model, tier, reason, int((time.monotonic() - t0) * 1000))
+            errlog.record_failure("gemini", model, error_type=reason, message=msg, context={"tier": tier, "timeout_ms": timeout_ms, "latency_ms": int((time.monotonic() - t0) * 1000)})
+    errlog.record_failure("gemini", "ladder", error_type="ladder_exhausted", context={"tier": tier, "tried": list(tried), "reasons": reasons})
+    errlog.notify_once("ladder", errlog.ladder_message(reasons), every_s=_COOLDOWN_SECONDS)
     return None
 
 

@@ -237,6 +237,14 @@ já está no `.gitignore`.
 **Parecer.** É a base de quase tudo acima: sem registro, não dá para saber o que quebrou, medir
 latência (13) nem aprender rotina (10). E é pequeno.
 
+**Estado (2026-10-18): implementado na spec 001** (`specs/001-error-log-llm-usage/`): `logs/` com
+console, falhas agrupadas por assinatura, relatos (`report_problem` + relato automático) e uso de
+LLM com custo estimado; `tools/usage_report.py` resume. O que a medição real mostrou (sessão de voz
+de 3,5 min, `gemini-3.1-flash-live-preview`): cada turno reenvia **~17 mil tokens fixos de texto**
+(prompt do sistema + declarações das ferramentas), então um turno custa **US$ 0,009–0,024 se fosse
+pago** — o custo de uma conversa vem do contexto, não da fala. A medição de duas semanas segue
+rodando; a decisão de custo (D10) usa esses números.
+
 **Recomendação.** `logging` com arquivo rotativo em `logs/` mais um registro estruturado (JSON
 Lines) de falhas: ação, erro, contexto, versão (commit), com filtro de segredos. Uma ferramenta
 `report_problem` para quando você disser "não funcionou" (o JARVIS anota o que você esperava).

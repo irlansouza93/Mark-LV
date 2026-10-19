@@ -16,6 +16,30 @@ PATCH a cada correção. Tags: `v55.x.y`.
   roteiro refeito com as specs de gestão pessoal.
 - Agentes do projeto por modelo (`lv-implementer` Sonnet, `lv-quick` Haiku, `lv-reviewer` Opus),
   skills `lv-validate`, `lv-new-skill` e `lv-triage`, hook de `py_compile` e hook de sessão na nuvem.
+- Spec 001 — registro de falhas e medição de uso de LLM (tudo em `logs/`, local, sem segredos):
+  - **Falhas:** o console vai também para `logs/jarvis.log`; falhas de ações, plugins, ferramentas,
+    escada do Gemini, sessão de voz e exceções que escapam (`core/errlog.py`, `core/redact.py`) vão
+    para `logs/failures.jsonl` com contexto, versão, assinatura (sem número de linha) e limite de
+    rajada. A "falha mole" (a ação engoliu o erro e devolveu texto) também é registrada. Escada do
+    Gemini esgotada ou sem rede vira uma linha no log da tela.
+  - **Uso de LLM e custo** (`core/llm_usage.py`, `config/llm_prices.json`): cada chamada avulsa,
+    turno de voz e amostra de voz grava tokens por modalidade, latência e o custo estimado no pago
+    (mesmo no grátis). `tools/usage_report.py` resume por dia, modelo ou provedor.
+  - **`report_problem`:** ferramenta de voz que anota "não funcionou" com a transcrição, as últimas
+    ferramentas e as falhas recentes; e um **relato automático** quando a fala contém "não
+    funcionou", "não deu certo" ou "deu errado" (`source: tool|auto` em `logs/reports.jsonl`).
+  - Primeira base de testes (`tests/`, `requirements-dev.txt`) e a skill `lv-triage` atualizada com
+    os formatos reais.
+  - **Limites conhecidos:** SC-007 (relato com a expectativa certa) não atingido — o reconhecimento de
+    voz do Gemini transcreve mal parte das frases (1 de 3 relatos com "eu queria X", e com X errado);
+    SC-004 conferido com uma sessão real de 3,5 min e 1 chamada avulsa (não 10 min); SC-008 (plugin em
+    loop por 10 min) não foi executado, só coberto por testes do limite de rajada.
+
+### Changed
+- Exceção que escapa de um slot do Qt (ou de qualquer thread) não fecha mais o JARVIS: o
+  `sys.excepthook` próprio da spec 001 registra a falha em `logs/failures.jsonl`, imprime o
+  traceback como antes e o app segue rodando. Antes, o PyQt6 abortava o processo. Decidido pelo
+  Irlan em 2026-10-17.
 
 ## [55.1.0] — 2026-10-15
 
