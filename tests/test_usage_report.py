@@ -1,5 +1,6 @@
 """tools/usage_report.py — the 14-day summary (contract: usage-report-cli.md). Synthetic records only."""
 import json
+import re
 import subprocess
 import sys
 import time
@@ -203,3 +204,135 @@ def test_no_estimate_note_when_every_session_ended(tmp_path, capsys, prices):
     write(logs, [rec(0, model="live", kind="live_turn", live_session="z"), end])
     code, out = run(capsys, "--logs", str(logs), "--days", "1")
     assert "voz: 10 min" in out and "estimados" not in out
+
+
+# ── "Espera da voz" section (spec 002, US3) ──────────────────────────────────────────────
+LIMITS = {"thinking_ms": 1500, "phrase_ms": 4000, "give_up_ms": 20000}
+
+
+def wait(days_ago, latency=1000, tool=False, hour=10, minute=0, outcome="audio", limits=LIMITS, **kw):
+    r = {"v": 1, "kind": "voice_wait", "ts": day_ts(days_ago, hour, minute), "provider": "gemini",
+         "model": "gemini-live", "source": "voice", "outcome": outcome, "cancel_reason": None,
+         "latency_ms": latency, "tool": tool, "thinking": False, "phrase": None, "gave_up": False,
+         "enabled": True, "limits": limits}
+    r.update(kw)
+    return r
+
+
+def episodes_42():
+    """28 no-tool (100..2800 ms), 11 tool (1000..11000 ms), 3 episodes with no latency."""
+    recs = [wait(1, latency=100 * i, minute=i, thinking=i <= 17) for i in range(1, 29)]
+    recs += [wait(1, latency=1000 * i, tool=True, hour=11, minute=i) for i in range(1, 12)]
+    recs += [wait(1, latency=None, outcome="no_reply", hour=12, minute=i) for i in range(1, 4)]
+    return recs
+
+
+def test_wait_section_matches_the_contract_format(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    recs = episodes_42()
+    for i in range(6):                                    # "Um momento" x 6, one of them the tone
+        recs[i]["phrase"] = "tone" if i == 0 else "voice"
+    write(logs, [rec(1)] + recs)
+    code, out = run(capsys, "--logs", str(logs), "--days", "14")
+    assert code == 0
+    lines = out.splitlines()
+    at = [i for i, l in enumerate(lines) if l.startswith("Espera da voz")]
+    assert len(at) == 1
+    section = lines[at[0]:]
+    assert section[0] == "Espera da voz (fim da fala → primeiro áudio), 42 pedidos"
+    assert section[1] == "  sem ferramenta: 28 · p50 1,4 s · p90 2,6 s · p95 2,7 s"
+    assert section[2] == "  com ferramenta: 11 · p50 6,0 s · p90 10,0 s · p95 11,0 s"
+    assert section[3] == '  rede agiu: pensando 17 · "Um momento" 6 (tom 1) · desistência 0 · sem resposta 3'
+    # 39 latencies >= 30: HUD = p90 no-tool 2,6 s; phrase = max(2,6 + 1,5, p90 of all); give up = 20 s
+    assert section[4].startswith("  sugestão de limites: pensando 2,6 s · frase ")
+    assert section[4].endswith("desistência 20 s  (atual 1,5 / 4 / 20 s)")
+    assert len(section) == 5
+    assert not re.search(r"\d\.\d", "\n".join(section))      # decimal comma, like the rest of the report
+
+
+def test_wait_section_is_the_last_thing_in_the_report(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    write(logs, [rec(1, result="quota", hour=14, tokens={})] + [wait(1, minute=i) for i in range(3)])
+    code, out = run(capsys, "--logs", str(logs))
+    lines = out.splitlines()
+    first = next(i for i, l in enumerate(lines) if l.startswith("Espera da voz"))
+    assert any("Total do período" in l for l in lines[:first])
+    assert lines[first - 1] == ""                          # a blank line separates it from the footers
+
+
+def test_atual_comes_from_the_most_recent_voice_wait(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    old = {"thinking_ms": 1000, "phrase_ms": 3000, "give_up_ms": 10000}
+    new = {"thinking_ms": 2500, "phrase_ms": 6000, "give_up_ms": 30000}
+    recs = [wait(3, latency=900 + i, limits=old) for i in range(15)]
+    recs += [wait(1, latency=900 + i, hour=15, limits=new) for i in range(15)]
+    recs += [wait(2, latency=900 + i, hour=9, limits=old) for i in range(5)]    # written later in the file, older ts
+    write(logs, [rec(1)] + recs)
+    code, out = run(capsys, "--logs", str(logs))
+    assert "(atual 2,5 / 6 / 30 s)" in out
+
+
+def test_insufficient_data_line(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    write(logs, [rec(1)] + [wait(1, latency=1000 + i, minute=i) for i in range(12)])
+    code, out = run(capsys, "--logs", str(logs))
+    assert "  sugestão de limites: dados insuficientes (12 de 30)" in out.splitlines()
+    assert "pensando 1" not in out.split("sugestão de limites")[1]
+
+
+def test_without_voice_wait_the_text_output_is_unchanged(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    base = [rec(1), rec(2, model="gemini-3.1-flash-live-preview", kind="live_turn")]
+    write(logs, base)
+    code, out = run(capsys, "--logs", str(logs))
+    assert code == 0 and "Espera da voz" not in out and "sugestão" not in out
+    # and adding voice_wait records only appends lines: everything above them is byte-identical
+    write(logs, base + [wait(1)])
+    code, out2 = run(capsys, "--logs", str(logs))
+    assert out2.startswith(out + "\n") and "Espera da voz" in out2
+
+
+def test_voice_wait_does_not_change_the_cost_table(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    write(logs, [rec(1)])
+    _, plain = run(capsys, "--logs", str(logs), "--json")
+    write(logs, [rec(1), wait(1), wait(1, minute=5)])
+    _, mixed = run(capsys, "--logs", str(logs), "--json")
+    a, b = json.loads(plain), json.loads(mixed)
+    for key in ("rows", "totals", "models_without_price", "quota_events", "skipped"):
+        assert a[key] == b[key], key
+
+
+def test_json_carries_the_wait_summary(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    recs = [rec(1)] + episodes_42()
+    write(logs, recs)
+    code, out = run(capsys, "--logs", str(logs), "--json")
+    got = json.loads(out)
+    expected = json.loads(json.dumps(llm_usage.wait_summary(recs)))
+    assert code == 0 and got["voice_wait"] == expected
+    assert got["voice_wait"]["episodes"] == 42 and got["voice_wait"]["with_latency"] == 39
+
+
+def test_json_without_voice_wait_has_an_empty_wait_summary(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    write(logs, [rec(1)])
+    code, out = run(capsys, "--logs", str(logs), "--json")
+    assert json.loads(out)["voice_wait"]["episodes"] == 0
+
+
+def test_only_voice_wait_records_still_show_the_section(tmp_path, capsys, prices):
+    logs = tmp_path / "logs"
+    write(logs, [wait(1, minute=i) for i in range(3)])
+    code, out = run(capsys, "--logs", str(logs), "--days", "14")
+    assert code == 0
+    assert "nenhum registro no período" in out and "Espera da voz" in out and "3 pedidos" in out
+
+
+def test_wait_section_survives_a_console_that_cannot_print_the_arrow(tmp_path, prices):
+    logs = tmp_path / "logs"
+    write(logs, [rec(1), wait(1)])
+    out = subprocess.run([sys.executable, str(usage_report.__file__), "--logs", str(logs)],
+                         capture_output=True, text=True, encoding="cp1252", errors="strict")
+    assert out.returncode == 0, out.stderr
+    assert "Espera da voz" in out.stdout
