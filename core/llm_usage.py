@@ -430,7 +430,8 @@ def _fin_session_end(rec: dict, ts: float):
 
 
 def live_session_end(reason: str, ts: float | None = None) -> None:
-    """The voice session ended: ``voluntary`` (reconnect we asked for), ``error`` or ``shutdown``.
+    """The voice session ended: ``voluntary`` (reconnect we asked for), ``go_away`` (renewed
+    before the server's connection time cap), ``error`` or ``shutdown``.
     ``ts`` is when it really ended: the connection loop's ``finally`` runs after the backoff sleep
     and after waiting for a new key, which would inflate ``duration_s``, so main.py captures the
     time at the start of the ``except`` and passes it here (``None`` = now)."""

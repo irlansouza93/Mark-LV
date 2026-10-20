@@ -42,6 +42,16 @@ PATCH a cada correção. Tags: `v55.x.y`.
   Irlan em 2026-10-17.
 
 ### Fixed
+- **Sessão de voz caía a cada ~10 min (GoAway)**: o servidor do Gemini Live avisa com `go_away`
+  (e `time_left`) antes de fechar a conexão no limite de tempo; o app ignorava o aviso e era
+  derrubado com `1008 (policy violation)` (56 vezes em 2026-10-19). Agora renova a conexão com o
+  handle de retomada no primeiro momento de silêncio (sem áudio do modelo nem fala do usuário) e,
+  em qualquer caso, 3 s antes do prazo; o fim fica registrado como `go_away` no uso de LLM.
+  As ferramentas passam a rodar fora do laço de recepção (antes ele ficava cego durante uma
+  pesquisa de 14 s+ e não via o aviso), e um resultado cuja conexão acabou — ou cuja resposta
+  falada foi cortada — é entregue como texto à sessão nova, para o usuário ouvir a resposta
+  (`core/live_session.py`: `go_away_should_reconnect`, `ResultMailbox`, `orphan_prompt`).
+
 Bugs do código do upstream vistos nos logs reais da validação da spec 001 (2026-10-17):
 - `open_app` dizia "Opened C:\…\arquivo.txt." para um arquivo que não existe (o `:` do drive caía
   no ramo `start <nome>`, que volta antes do Windows mostrar o erro). Caminho absoluto inexistente
