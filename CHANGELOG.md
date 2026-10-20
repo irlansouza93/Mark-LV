@@ -34,6 +34,7 @@ PATCH a cada correção. Tags: `v55.x.y`.
     voz do Gemini transcreve mal parte das frases (1 de 3 relatos com "eu queria X", e com X errado);
     SC-004 conferido com uma sessão real de 3,5 min e 1 chamada avulsa (não 10 min); SC-008 (plugin em
     loop por 10 min) não foi executado, só coberto por testes do limite de rajada.
+- Wait safety net (spec 002): when the model stays silent after the user speaks, the HUD shows the thinking state (1.5 s), JARVIS says a short cached "one moment" phrase (4 s, once per request, rotating among 5 pt-BR variants) captured once from the Live model itself in the session's voice and checked against its transcript (TTS with the BCP-47 speech language as fallback, a short tone as last resort); the phrase always finishes before the answer, with a 0.2 s pause, and the mic is gated while it plays so it never reaches the model as user speech; and, after 20 s with no reply and no tool running, a give-up phrase plus a soft failure in logs/. Every request records its latency (`voice_wait`) in the usage log; `tools/usage_report.py` shows p50/p90/p95 with and without tools and suggests new limits. Limits live in `config/api_keys.json` → `wait_cue`.
 
 ### Changed
 - Exceção que escapa de um slot do Qt (ou de qualquer thread) não fecha mais o JARVIS: o
@@ -45,12 +46,19 @@ PATCH a cada correção. Tags: `v55.x.y`.
 - **Sessão de voz caía a cada ~10 min (GoAway)**: o servidor do Gemini Live avisa com `go_away`
   (e `time_left`) antes de fechar a conexão no limite de tempo; o app ignorava o aviso e era
   derrubado com `1008 (policy violation)` (56 vezes em 2026-10-19). Agora renova a conexão com o
-  handle de retomada no primeiro momento de silêncio (sem áudio do modelo nem fala do usuário) e,
-  em qualquer caso, 3 s antes do prazo; o fim fica registrado como `go_away` no uso de LLM.
+  handle de retomada no primeiro momento de silêncio (sem áudio do modelo, sem fala do usuário e
+  sem resposta devida a uma pergunta) e, em qualquer caso, 3 s antes do prazo; o fim fica
+  registrado como `go_away` no uso de LLM. No modo wake-word, quem estava acordado continua
+  acordado depois da renovação.
   As ferramentas passam a rodar fora do laço de recepção (antes ele ficava cego durante uma
-  pesquisa de 14 s+ e não via o aviso), e um resultado cuja conexão acabou — ou cuja resposta
-  falada foi cortada — é entregue como texto à sessão nova, para o usuário ouvir a resposta
-  (`core/live_session.py`: `go_away_should_reconnect`, `ResultMailbox`, `orphan_prompt`).
+  pesquisa de 14 s+ e não via o aviso). Efeito visível: uma ferramenta `NON_BLOCKING` agora deixa
+  o modelo falar enquanto roda, e dois pedidos seguidos podem rodar ao mesmo tempo. Um resultado
+  cuja conexão acabou — ou cuja resposta falada foi cortada — é entregue como texto, delimitado
+  e marcado como dado, à sessão nova, para o usuário ouvir a resposta; a captura de
+  `screen_process` não atravessa a reconexão (o modelo avisa e oferece olhar de novo, e a câmera
+  aberta por ela é fechada). Ferramenta que levanta exceção agora devolve um erro ao modelo em vez
+  de deixá-lo esperando (`core/live_session.py`: `go_away_should_reconnect`, `ResultMailbox`,
+  `orphan_prompt`).
 
 Bugs do código do upstream vistos nos logs reais da validação da spec 001 (2026-10-17):
 - `open_app` dizia "Opened C:\…\arquivo.txt." para um arquivo que não existe (o `:` do drive caía

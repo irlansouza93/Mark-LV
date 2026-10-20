@@ -3,6 +3,8 @@ Resumo de uso de LLM do Mark LV (ferramenta de desenvolvimento, nao faz parte do
 
 Le logs/usage-YYYY-MM.jsonl (escritos por core/llm_usage.py) e imprime, por dia, provedor
 e modelo: chamadas, falta de cota, tokens, minutos de voz e custo estimado se fosse pago.
+Com registros "voice_wait" (aviso de espera da voz) no periodo, acrescenta a secao "Espera da voz":
+latencias p50/p90/p95, o que a rede de seguranca fez e sugestao de limites.
 Nao chama nenhum servico: so le arquivos locais.
 
     .venv/Scripts/python.exe tools/usage_report.py [--days N | --from AAAA-MM-DD [--to AAAA-MM-DD]]
@@ -11,6 +13,7 @@ Nao chama nenhum servico: so le arquivos locais.
 Codigo de saida: 0 (com ou sem registros), 2 para argumentos invalidos. Linhas corrompidas
 (corte por queda de energia) sao ignoradas e contadas no rodape.
 Contrato: specs/001-error-log-llm-usage/contracts/usage-report-cli.md
+          e specs/002-wait-safety-net/contracts/usage-record.md (secao Espera da voz)
 """
 from __future__ import annotations
 
@@ -119,7 +122,57 @@ def _table(rows, by: str) -> list[str]:
     return [line(head)] + [line(r) for r in body]
 
 
-def _report(summary: dict, start: date, end: date, days: int, checked, corrupt: int, by: str) -> str:
+def _secs(ms, decimals: bool = True) -> str:
+    """Milliseconds -> seconds with a decimal comma ("1,9"); without ``decimals`` a whole number
+    of seconds drops the ",0" ("20"), as the limits are usually written."""
+    text = f"{ms / 1000:.1f}".replace(".", ",")
+    return text[:-2] if not decimals and text.endswith(",0") else text
+
+
+def _latest_limits(records):
+    """``limits`` of the most recent voice_wait record (by time; a record with no usable time
+    ranks oldest), or None. These are the limits the app was running with, to compare with the
+    suggestion."""
+    best, best_ts = None, None
+    for r in records:
+        if not isinstance(r, dict) or r.get("kind") != "voice_wait" or not isinstance(r.get("limits"), dict):
+            continue
+        dt = llm_usage.parse_ts(r.get("ts"), None)
+        if best is None or (dt is not None and (best_ts is None or dt >= best_ts)):
+            best, best_ts = r["limits"], dt
+    return best
+
+
+def _wait_lines(ws: dict, current) -> list[str]:
+    """The "Espera da voz" section (contract: specs/002-wait-safety-net/contracts/usage-record.md)."""
+    out = [f"Espera da voz (fim da fala → primeiro áudio), {ws['episodes']} pedidos"]
+    for label, key in (("sem ferramenta", "no_tool"), ("com ferramenta", "tool")):
+        g = ws[key]
+        if g:
+            out.append(f"  {label}: {g['n']} · p50 {_secs(g['p50'])} s · p90 {_secs(g['p90'])} s · p95 {_secs(g['p95'])} s")
+        else:
+            out.append(f"  {label}: 0")
+    f, o = ws["fired"], ws["outcomes"]
+    out.append(f"  rede agiu: pensando {f['thinking']} · \"Um momento\" {f['phrase']} (tom {f['phrase_tone']})"
+               f" · desistência {f['gave_up']} · sem resposta {o['no_reply']}"
+               + (f" · eco suspeito {ws['echo_suspect']}" if ws.get("echo_suspect") else ""))
+    s = ws["suggested"]
+    if s is None:
+        out.append(f"  sugestão de limites: {ws['suggest_note']}")
+    else:
+        line = (f"  sugestão de limites: pensando {_secs(s['thinking_ms'])} s · frase {_secs(s['phrase_ms'])} s"
+                f" · desistência {_secs(s['give_up_ms'], False)} s")
+        if current:
+            try:
+                line += "  (atual " + " / ".join(_secs(current[k], False) for k in ("thinking_ms", "phrase_ms", "give_up_ms")) + " s)"
+            except (KeyError, TypeError):
+                pass                            # a limits dict from some future version: skip the comparison
+        out.append(line)
+    return out
+
+
+def _report(summary: dict, start: date, end: date, days: int, checked, corrupt: int, by: str,
+            wait=None) -> str:
     out = []
     when = f"precos conferidos em {checked}".replace("precos", "preços") if checked else "tabela de preços ausente"
     out.append(f"Uso de LLM - {start} a {end} ({days} dias)   {when}")
@@ -168,6 +221,8 @@ def _report(summary: dict, start: date, end: date, days: int, checked, corrupt: 
         out.append(f"{corrupt} linha(s) corrompida(s) ignorada(s)")
     if summary["skipped"]:
         out.append(f"{summary['skipped']} registro(s) sem horário válido ignorado(s)")
+    if wait:
+        out += ["", *wait]
     return "\n".join(out)
 
 
@@ -215,18 +270,23 @@ def main(argv=None) -> int:
 
     records, corrupt = _read_records(Path(args.logs), start, end)
     summary = llm_usage.summarize(records, None)
+    wait_summary = llm_usage.wait_summary(records)
+    wait = _wait_lines(wait_summary, _latest_limits(records)) if wait_summary["episodes"] else None
     checked = llm_usage.load_prices().get("checked")
     if args.json:
         payload = dict(summary, period={"from": str(start), "to": str(end), "days": days},
-                       prices_checked=checked, corrupt_lines=corrupt)
+                       prices_checked=checked, corrupt_lines=corrupt, voice_wait=wait_summary)
         print(json.dumps(payload, ensure_ascii=True, indent=2, default=str))
         return 0
     if not summary["rows"]:
         print(f"nenhum registro no período ({start} a {end})")
         if corrupt:
             print(f"{corrupt} linha(s) corrompida(s) ignorada(s)")
+        if wait:                                 # a period with only wait records still has something to show
+            print()
+            print("\n".join(wait))
         return 0
-    print(_report(summary, start, end, days, checked, corrupt, args.by))
+    print(_report(summary, start, end, days, checked, corrupt, args.by, wait))
     return 0
 
 
