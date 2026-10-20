@@ -650,6 +650,7 @@ class JarvisLive:
         # "a cue is what is playing" must be known to cut it when the model answers
         # and to release the mic when it ends with no answer behind it.
         self._cue_playing = False
+        self._model_audio_n = 0         # bumped per slice of model audio; see _wait_play_cue
         self._cue_voice   = ""          # voice/language of the CURRENT session: the cached
         self._cue_lang    = "en"        # phrase must match the voice the user hears
         self._cue_warned: set[tuple[str, str]] = set()   # (voice, lang) already told about
@@ -795,10 +796,16 @@ class JarvisLive:
         answer (or the user interrupt) while the cache is being read; then the phrase
         is dropped instead of being queued behind real audio."""
         w = self._wait
+        n0 = self._model_audio_n
         pcm, how = await asyncio.to_thread(
             _wait_cue.pcm_for, kind, self._cue_voice, self._cue_lang)
         q = self.audio_in_queue
-        if q is None or (only_while_waiting and not (w is self._wait and w is not None and w.waiting)):
+        # Real audio always wins: if the queue is not empty (the tail of an earlier
+        # answer still playing) or the model's first slice arrived during the cache
+        # read, the phrase would land behind it and _cue_cut would then eat the answer.
+        if q is None or not q.empty() or self._model_audio_n != n0:
+            return None
+        if only_while_waiting and not (w is self._wait and w is not None and w.waiting):
             return None
         data = pcm.tobytes()
         for i in range(0, len(data), 2400):     # 50 ms slices, like the receive loop
@@ -818,20 +825,26 @@ class JarvisLive:
     async def _wait_cue_loop(self) -> None:
         """Ticks the watchdog every 100 ms and carries out what it asks for.
         Dies with the session (TaskGroup); the watchdog is rebuilt per connection."""
+        prev_muted, prev_asleep = self.ui.muted, self._wake_enabled and not self._awake
         while True:
             await asyncio.sleep(0.1)
             w = self._wait
             if w is None:
                 continue
             try:
+                muted = self.ui.muted
+                asleep = self._wake_enabled and not self._awake
+                # Cancel on the TRANSITION to muted/asleep, not while it holds: a typed
+                # request sent with the mic muted is still owed an answer (and a sign
+                # of life), and the mic is irrelevant to someone who typed.
                 if w.waiting:
-                    # Nothing is owed while muted or asleep: the user is not waiting.
-                    if self.ui.muted:
+                    if muted and not prev_muted and w.source != "text":
                         self._wait_record(w.cancel("muted"))
-                        continue
-                    if self._wake_enabled and not self._awake:
+                    elif asleep and not prev_asleep:
                         self._wait_record(w.cancel("asleep"))
-                        continue
+                prev_muted, prev_asleep = muted, asleep
+                if not w.waiting:
+                    continue
                 actions, rec = w.tick()
                 for act in actions:
                     if act == "thinking":
@@ -847,8 +860,7 @@ class JarvisLive:
                             context={"limits": (rec or {}).get("limits"),
                                      "tool": (rec or {}).get("tool")})
                         self.ui.write_log("SYS: No reply from the model — please repeat.")
-                        if not self.ui.muted:
-                            self.ui.set_state("LISTENING")
+                        self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
                 self._wait_record(rec)
             except Exception as e:
                 errlog.record_failure("voice", "wait_cue_loop", exc=e)
@@ -1807,6 +1819,7 @@ class JarvisLive:
                         else:
                             # First audio closes the wait episode (latency record).
                             self._wait_record(self._wait_call("model_audio"))
+                            self._model_audio_n += 1
                             if self._cue_playing:
                                 self._cue_cut()    # only the phrase is queued; the model takes over
                             if self._turn_done_event and self._turn_done_event.is_set():
@@ -1845,7 +1858,12 @@ class JarvisLive:
                                 self._last_user_speech = time.monotonic()
                                 # Live has no end-of-speech event: the last input
                                 # transcription chunk is the anchor (spec 002, research R1).
+                                _w = self._wait
+                                _was_thinking = (_w is not None and _w.waiting
+                                                 and _w.thinking_shown and not self._cue_playing)
                                 self._wait_call("user_speech")
+                                if _was_thinking:       # spoke again: no longer "thinking"
+                                    self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
 
                         if sc.turn_complete:
                             if self._turn_done_event:
@@ -1853,10 +1871,13 @@ class JarvisLive:
 
                             # Turn ended with no audio: the net may have put the HUD
                             # on "thinking"; give it back (read the flag BEFORE closing).
-                            _was_thinking = self._wait is not None and self._wait.thinking_shown
+                            # Only an episode still open means "no audio": after audio the
+                            # playback loop owns the HUD (it may still have queue to play).
+                            _w = self._wait
+                            _was_thinking = _w is not None and _w.waiting and _w.thinking_shown
                             self._wait_record(self._wait_call("turn_complete"))
-                            if _was_thinking and not self.ui.muted:
-                                self.ui.set_state("LISTENING")
+                            if _was_thinking:
+                                self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
 
                             # If this turn_complete ends an interrupted response, clear the
                             # flag and skip all further processing for that turn.
@@ -1991,7 +2012,7 @@ class JarvisLive:
                         # (turn_done is not coming) and put "thinking" back if the wait goes on.
                         self._cue_playing = False
                         self.set_speaking(False)
-                        if self._wait is not None and self._wait.waiting and not self.ui.muted:
+                        if self._wait is not None and self._wait.waiting:
                             self.ui.set_state("THINKING")
                     continue
 

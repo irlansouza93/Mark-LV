@@ -442,3 +442,64 @@ def test_prefetch_unknown_language_falls_back_to_english_text(cache):
     wait_cue.prefetch("Charon", "xx", synth=lambda v, l, text=None, style=None: (
         got.append(text) or (np.ones(10, dtype=np.int16), 24000))).join(5)
     assert wait_cue.TEXTS["hold"]["en"] in got
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+def test_source_is_public_and_follows_how_the_episode_opened(clk):
+    wd = WaitWatchdog(LIM, clock=clk)
+    wd.user_speech()
+    assert wd.source == "voice"
+    wd.cancel("x")
+    wd.user_text()
+    assert wd.source == "text"
+
+
+def test_user_speech_while_waiting_rearms_thinking_but_not_the_phrase(wd, clk):
+    wd.user_speech()
+    acts, _ = run(wd, clk, 1.6)
+    assert acts == ["thinking"] and wd.thinking_shown
+    wd.user_speech()                       # the user spoke again: new anchor
+    assert not wd.thinking_shown
+    acts, _ = run(wd, clk, 1.6)
+    assert acts == ["thinking"]            # shown again from the new anchor
+    acts, _ = run(wd, clk, 3.0)
+    assert acts.count("phrase") == 1       # the phrase is still once per episode
+    acts, _ = run(wd, clk, 1.0)
+    assert "phrase" not in acts
+    wd.model_audio()
+    assert wd.turn_complete() is None
+
+
+def test_record_keeps_thinking_true_even_after_rearming(wd, clk):
+    wd.user_speech()
+    run(wd, clk, 1.6)
+    wd.user_speech()
+    assert wd.turn_complete()["thinking"] is True
+
+
+def test_load_phrase_empty_wav_is_none(cache):
+    _put_wav(wait_cue.phrase_path("hold", "Charon", "pt"), [], 24000)
+    assert wait_cue.load_phrase("hold", "Charon", "pt") is None
+
+
+def test_prefetch_regenerates_unreadable_or_empty_cache_files(cache):
+    wait_cue.phrase_path("hold", "Charon", "pt").write_bytes(b"garbage")
+    _put_wav(wait_cue.phrase_path("giveup", "Charon", "pt"), [], 24000)
+    calls = []
+
+    def synth(voice, lang, text=None, style=None):
+        calls.append(text)
+        return np.ones(2400, dtype=np.int16), 24000
+
+    wait_cue.prefetch("Charon", "pt", synth=synth).join(5)
+    assert len(calls) == 2
+    assert wait_cue.load_phrase("hold", "Charon", "pt") is not None
+    assert wait_cue.load_phrase("giveup", "Charon", "pt") is not None
+
+
+def test_prefetch_empty_pcm_is_an_error_and_writes_nothing(cache):
+    errors = []
+    wait_cue.prefetch("Charon", "pt", on_error=lambda k, m: errors.append(k),
+                      synth=lambda *a, **k: (np.zeros(0, dtype=np.int16), 24000)).join(5)
+    assert sorted(errors) == ["giveup", "hold"]
+    assert list(cache.iterdir()) == []

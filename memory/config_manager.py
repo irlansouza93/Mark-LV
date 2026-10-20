@@ -415,6 +415,14 @@ def get_wait_cue() -> dict:
         except (TypeError, ValueError):
             return default
 
+    def _flag(v) -> bool:
+        # A hand-edited "false" must not read as truthy; anything unrecognised keeps the net ON.
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str) and v.strip().lower() in ("false", "0", "no", "off"):
+            return False
+        return True
+
     thinking = _int("thinking_ms", 1500, 300, 10000)
     phrase = _int("phrase_ms", 4000, 1000, 30000)
     give_up = _int("give_up_ms", 20000, 5000, 120000)
@@ -423,7 +431,7 @@ def get_wait_cue() -> dict:
     if give_up <= phrase:
         give_up = phrase + 1000
     return {
-        "enabled":     bool(cfg.get("enabled", True)),
+        "enabled":     _flag(cfg.get("enabled", True)),
         "thinking_ms": thinking,
         "phrase_ms":   phrase,
         "give_up_ms":  give_up,

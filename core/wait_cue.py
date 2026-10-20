@@ -103,7 +103,8 @@ class WaitWatchdog:
     def _reset_episode(self) -> None:
         self._source = "voice"
         self._anchor = 0.0
-        self._thinking = False
+        self._thinking = False                   # "thinking" is currently on screen
+        self._thinking_ever = False              # it was shown at some point (for the record)
         self._phrase: str | None = None          # None | "pending" | "voice" | "tone"
         self._tool_active = 0
         self._tool_seen = False
@@ -124,7 +125,7 @@ class WaitWatchdog:
             "cancel_reason": cancel_reason,
             "latency_ms": latency_ms,
             "tool": self._tool_seen,
-            "thinking": self._thinking,
+            "thinking": self._thinking_ever,
             "phrase": self._phrase if self._phrase in ("voice", "tone") else None,
             "gave_up": self._gave_up,
             "enabled": lim.enabled,
@@ -141,6 +142,9 @@ class WaitWatchdog:
             self._open("voice", now)
         elif self._state == _WAITING:
             self._anchor = now
+            # The user spoke again: the caller puts the HUD back to listening, and
+            # "thinking" may show again from the new anchor (the phrase stays once).
+            self._thinking = False
         # EXCHANGE: a late transcript of the request already being answered
 
     @_safe()
@@ -214,7 +218,7 @@ class WaitWatchdog:
         waited_ms = (now - self._anchor) * 1000
         actions: list[str] = []
         if not self._thinking and waited_ms >= lim.thinking_ms:
-            self._thinking = True
+            self._thinking = self._thinking_ever = True
             actions.append("thinking")
         if self._phrase is None and waited_ms >= lim.phrase_ms:
             self._phrase = "pending"
@@ -230,6 +234,11 @@ class WaitWatchdog:
         return actions, None
 
     # ── state for the caller ─────────────────────────────────────────────────
+    @property
+    def source(self) -> str:
+        """How the open (or last) episode started: ``voice`` or ``text``."""
+        return self._source
+
     @property
     def waiting(self) -> bool:
         return self._state == _WAITING
@@ -332,7 +341,9 @@ def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None 
     atomic), so the next connection simply tries again. ``synth`` is injectable
     for tests; the default is the picker's TTS ladder with a butler-like style.
     """
-    missing = [k for k in TEXTS if not phrase_path(k, voice, lang).exists()]
+    # An existing but unreadable or empty file counts as missing: otherwise a bad
+    # cache would mean the tone forever, with nothing ever regenerating it.
+    missing = [k for k in TEXTS if load_phrase(k, voice, lang) is None]
     if not missing:
         return None
 
@@ -343,6 +354,8 @@ def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None 
             try:
                 text = TEXTS[kind].get(lang) or TEXTS[kind]["en"]
                 pcm, rate = fn(voice, lang, text=text, style=_STYLE)
+                if pcm is None or len(pcm) == 0:
+                    raise RuntimeError("TTS returned no audio")
                 voice_preview._write_wav(phrase_path(kind, voice, lang), _to_rate(pcm, rate), RATE)
             except Exception as e:
                 if on_error:

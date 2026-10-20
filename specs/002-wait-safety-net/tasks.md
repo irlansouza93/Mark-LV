@@ -95,8 +95,8 @@ principal com o Irlan. Nenhum agente faz commit/push/PR.
 
 - [x] T022 [P] *(lv-quick)* `CHANGELOG.md`, seção "Unreleased": "Added — wait safety net: HUD thinking state, spoken 'one moment' and give-up phrase when the model stays silent; per-turn latency (`voice_wait`) in the usage log and report (spec 002)"
 - [x] T023 [P] *(lv-quick)* `docs/demandas.md` §13 (estado: implementado na spec 002, padrões 1,5/4/20 s, recalibrar pelo `usage_report`), `docs/VISAO.md` (§6: recalibrar os limites após ~1 semana de uso) e `CLAUDE.md` (linha `core/wait_cue.py` no "Mapa do código")
-- [ ] T024 Skill `lv-validate`: `py_compile` de tudo que mudou, `pytest tests -q` (comparar com o número da T001), `graphify update .`
-- [ ] T025 Revisão independente com `lv-reviewer` do diff contra a constituição, a spec e as armadilhas do `CLAUDE.md`; corrigir os achados (lv-implementer)
+- [x] T024 Skill `lv-validate`: `py_compile` de tudo que mudou, `pytest tests -q` (comparar com o número da T001), `graphify update .`
+- [x] T025 Revisão independente com `lv-reviewer` do diff contra a constituição, a spec e as armadilhas do `CLAUDE.md`; corrigir os achados (lv-implementer)
 - [ ] T026 Teste real com o Irlan, num único roteiro: [quickstart.md](quickstart.md) §2–3 (fora do sandbox, com a chave). Se o caso 5 (fala não dirigida) vier `gave_up`, aplicar a contingência de [research.md R2](research.md#r2--proactive-audio-o-modelo-pode-escolher-ficar-calado) e registrar a decisão lá
 - [ ] T027 Commit na branch `002-wait-safety-net` e PR para `irlan-dev` com o resultado de cada linha do roteiro e o que não pôde ser verificado (Princípio II); conferir `git status` sem segredos
 

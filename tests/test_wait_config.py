@@ -75,3 +75,15 @@ def test_enabled_false_is_respected(cfg):
     cfg["wait_cue"] = {"enabled": False}
     got = cm.get_wait_cue()
     assert got["enabled"] is False and got["thinking_ms"] == 1500
+
+
+@pytest.mark.parametrize("given, expected", [
+    (True, True), (False, False),
+    ("false", False), ("False", False), (" FALSE ", False), ("0", False),
+    ("no", False), ("Off", False),
+    ("true", True), ("yes", True), ("", True),
+    (0, True), (None, True), ([], True),
+])
+def test_enabled_accepts_bool_and_false_like_strings_only(cfg, given, expected):
+    cfg["wait_cue"] = {"enabled": given}
+    assert cm.get_wait_cue()["enabled"] is expected
