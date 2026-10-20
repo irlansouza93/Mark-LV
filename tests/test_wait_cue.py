@@ -332,6 +332,8 @@ def cache(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_preview, "CACHE_DIR", tmp_path)
     wait_cue._last_variant.clear()
     wait_cue._live_tried.clear()
+    wait_cue._tts_tried.clear()
+    wait_cue._inflight.clear()
     return tmp_path
 
 
@@ -480,6 +482,7 @@ def test_prefetch_generates_every_variant_without_style_and_with_bcp47(cache):
 def test_prefetch_generates_only_the_missing_variant(cache):
     wait_cue.prefetch("Charon", "pt", synth=_synth_ok()).join(5)
     wait_cue.phrase_path("giveup", 1, "Charon", "pt").unlink()
+    wait_cue._tts_tried.clear()               # a new run of the app
     calls = []
     wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls)).join(5)
     assert [c["text"] for c in calls] == [wait_cue.TEXTS["giveup"]["pt"][1]]
@@ -620,6 +623,7 @@ def test_prefetch_regenerates_unreadable_or_empty_cache_files(cache):
     wait_cue.prefetch("Charon", "pt", synth=_synth_ok()).join(5)
     wait_cue.phrase_path("hold", 0, "Charon", "pt").write_bytes(b"garbage")
     _put_wav(wait_cue.phrase_path("giveup", 0, "Charon", "pt"), [], 24000)
+    wait_cue._tts_tried.clear()               # a new run of the app
     calls = []
     wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls)).join(5)
     assert len(calls) == 2
@@ -872,9 +876,12 @@ def test_prefetch_connect_failure_reports_live_once_and_uses_tts(cache):
 def test_prefetch_tries_live_once_per_run_for_each_voice_and_language(cache):
     fake = FakeLive(_echo, connect_error=RuntimeError("quota"))
     for _ in range(2):
-        wait_cue.prefetch("Charon", "pt", synth=_synth_ok(), live_model="m", connect=fake).join(5)
+        th = wait_cue.prefetch("Charon", "pt", synth=_synth_ok(), live_model="m", connect=fake)
+        if th:
+            th.join(5)
         for f in cache.glob("wait_v4_tts_*"):
             f.unlink()                      # force "missing" again; the Live attempt is already spent
+        wait_cue._tts_tried.clear()
     assert len(fake.connects) == 1
     wait_cue.prefetch("Charon", "en", synth=_synth_ok(), live_model="m", connect=fake).join(5)
     assert len(fake.connects) == 2
@@ -919,8 +926,9 @@ def test_pcm_for_with_text_returns_the_phrase_that_was_chosen(cache):
 
 
 @pytest.mark.parametrize("heard,ok", [
-    ("isso aqui", True),                                  # the tail of the phrase
+    ("ver isso aqui", True),                              # the tail of the phrase (3 words)
     ("Deixa eu ver isso aqui", True),
+    ("isso aqui", False),                                 # two words are too common in real speech
     ("deixa eu ver isso", True),
     ("qual a previsão do tempo", False),
     ("", False),
@@ -987,3 +995,44 @@ def test_usage_report_shows_echo_suspect_only_when_there_is_one():
     loud = usage_report._wait_lines(llm_usage.wait_summary([dict(base, echo_suspect=True)] * 3), None)
     line = [l for l in loud if "rede agiu" in l][0]
     assert line.endswith(" · eco suspeito 3")
+
+
+# ── review fixes: one prefetch at a time, one TTS attempt per run (T031 review) ──
+def test_prefetch_returns_none_while_a_thread_for_the_pair_is_alive(cache):
+    gate, started = threading.Event(), threading.Event()
+
+    def slow(*a, **k):
+        started.set()
+        gate.wait(5)
+        return _speech(1.5), 24000
+
+    th = wait_cue.prefetch("Charon", "pt", synth=slow)
+    assert started.wait(5)
+    # a reconnection while the first run is still capturing/synthesising
+    assert wait_cue.prefetch("Charon", "pt", synth=_synth_ok()) is None
+    assert wait_cue.prefetch("Charon", "pt", synth=_synth_ok(), live_model="m",
+                             connect=FakeLive(_echo)) is None
+    other = wait_cue.prefetch("Charon", "en", synth=_synth_ok())       # another pair is independent
+    assert other is not None
+    other.join(5)
+    gate.set()
+    th.join(5)
+    assert ("Charon", "pt") not in wait_cue._inflight and ("Charon", "en") not in wait_cue._inflight
+
+
+def test_prefetch_inflight_is_released_even_when_the_work_blows_up(cache):
+    th = wait_cue.prefetch("Charon", "pt", synth=lambda *a, **k: 1 / 0,
+                           on_error=lambda *a: 1 / 0)
+    th.join(5)
+    assert not wait_cue._inflight
+
+
+def test_prefetch_tts_is_tried_once_per_run_for_each_pair(cache):
+    calls = []
+    wait_cue.prefetch("Charon", "pt", synth=lambda *a, **k: calls.append(1) or 1 / 0).join(5)
+    assert len(calls) == 8
+    # next connection of the same run: nothing is hammered, no thread
+    assert wait_cue.prefetch("Charon", "pt", synth=lambda *a, **k: calls.append(1) or 1 / 0) is None
+    assert len(calls) == 8
+    wait_cue.prefetch("Charon", "en", synth=lambda *a, **k: calls.append(1) or 1 / 0).join(5)
+    assert len(calls) == 8 + 5

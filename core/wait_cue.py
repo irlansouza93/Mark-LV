@@ -456,6 +456,10 @@ _MATCH_MIN = 0.85       # a faithful take scores ~1.0; a swapped or mangled phra
 
 _live_tried: set[tuple[str, str]] = set()    # (voice, lang) already attempted in this run: the
                                              # quota is not hammered at every reconnection
+_tts_tried: set[tuple[str, str]] = set()     # same for the TTS reserve
+_inflight: set[tuple[str, str]] = set()      # (voice, lang) with a prefetch thread alive: the Live
+                                             # capture takes up to ~2 min, and a reconnection in
+                                             # that time must not start a second (TTS-only) one
 
 
 def _norm(text: str) -> str:
@@ -497,11 +501,13 @@ def cue_mute_s(duration_s: float, out_latency_s) -> float:
 
 def echo_suspect(heard: str, played: str) -> bool:
     """``heard`` (an input transcription) looks like the phrase we played: similar overall,
-    or a piece of it with at least two words (the transcript is usually only the tail)."""
+    or a piece of it with at least three words (the transcript is usually only the tail; two
+    words like "isso aqui" are too common in real speech). Diagnostic only: it never decides
+    whether the user was heard."""
     a, b = _norm(heard), _norm(played)
     if not a or not b:
         return False
-    if len(a.split()) >= 2 and f" {a} " in f" {b} ":
+    if len(a.split()) >= 3 and f" {a} " in f" {b} ":
         return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= _ECHO_RATIO
 
@@ -624,11 +630,16 @@ def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None 
     (``_write_wav`` is atomic); a failed Live connection is reported once as
     ``on_error("live", message)`` and stage (b) carries on.
 
-    Returns the thread, or None when nothing is missing. The cache is by voice, not by
+    Returns the thread, or None when nothing is missing, a thread for the same (voice, lang)
+    is still running (a reconnection during the up-to-2-minute Live capture), or the TTS
+    already had its one attempt of this run. The cache is by voice, not by
     model: changing ``LIVE_MODEL`` (or wanting new takes) means deleting
     ``config/voice_cache/wait_v4_live_*``. ``synth``/``connect`` are injectable for tests;
     the default ``synth`` is the picker's TTS with the bare text and the language code.
     """
+    key = (voice, lang)
+    if key in _inflight:
+        return None             # the run in progress already covers this pair
     variants = [(kind, i, text) for kind in TEXTS
                 for i, text in enumerate(_variants(kind, lang))]
     # An existing but unreadable or empty file counts as missing: otherwise a bad cache
@@ -638,7 +649,9 @@ def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None 
         live_todo = [v for v in variants if load_phrase(v[0], v[1], voice, lang, "live") is None]
         if live_todo:
             _live_tried.add((voice, lang))
-    if not live_todo and all(load_phrase(k, i, voice, lang) is not None for k, i, _ in variants):
+    tts_needed = key not in _tts_tried and any(
+        load_phrase(k, i, voice, lang) is None for k, i, _ in variants)
+    if not live_todo and not tts_needed:
         return None
 
     def report(kind: str, msg: str) -> None:
@@ -669,25 +682,36 @@ def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None 
                 report(kind, str(e))
 
     def work() -> None:
-        from core import voice_preview
-        if live_todo:
-            try:
-                live_stage()
-            except Exception as e:
-                report("live", str(e))
-        fn = synth or voice_preview._synthesise
-        code = BCP47.get(lang, "en-US")
-        for kind, i, text in variants:
-            if load_phrase(kind, i, voice, lang) is not None:
-                continue            # a live take (or an earlier tts one) already covers it
-            try:
-                pcm, rate = fn(voice, lang, text=text, style=None, language_code=code)
-                if pcm is None or len(pcm) == 0:
-                    raise RuntimeError("TTS returned no audio")
-                save(kind, i, "tts", pcm, rate)
-            except Exception as e:
-                report(kind, str(e))
+        try:
+            from core import voice_preview
+            if live_todo:
+                try:
+                    live_stage()
+                except Exception as e:
+                    report("live", str(e))
+            if key in _tts_tried:
+                return              # one TTS attempt per run: the quota is not hammered
+            fn = synth or voice_preview._synthesise
+            code = BCP47.get(lang, "en-US")
+            for kind, i, text in variants:
+                if load_phrase(kind, i, voice, lang) is not None:
+                    continue        # a live take (or an earlier tts one) already covers it
+                _tts_tried.add(key)
+                try:
+                    pcm, rate = fn(voice, lang, text=text, style=None, language_code=code)
+                    if pcm is None or len(pcm) == 0:
+                        raise RuntimeError("TTS returned no audio")
+                    save(kind, i, "tts", pcm, rate)
+                except Exception as e:
+                    report(kind, str(e))
+        finally:
+            _inflight.discard(key)
 
-    th = threading.Thread(target=work, daemon=True, name="wait-cue-prefetch")
-    th.start()
+    _inflight.add(key)
+    try:
+        th = threading.Thread(target=work, daemon=True, name="wait-cue-prefetch")
+        th.start()
+    except Exception:
+        _inflight.discard(key)
+        raise
     return th
