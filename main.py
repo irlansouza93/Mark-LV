@@ -761,16 +761,6 @@ class JarvisLive:
             errlog.record_failure("voice", f"wait_hook.{name}", exc=e)
             return None
 
-    def _cue_cut(self) -> None:
-        """Drop a queued cue phrase (the queue holds nothing else while it plays)."""
-        q = self.audio_in_queue
-        self._cue_playing = False
-        while q is not None:
-            try:
-                q.get_nowait()
-            except Exception:
-                break
-
     def _wait_record(self, rec) -> None:
         if rec:
             llm_usage.record_voice_wait(rec)    # only queues a dict; no I/O here
@@ -802,7 +792,7 @@ class JarvisLive:
         q = self.audio_in_queue
         # Real audio always wins: if the queue is not empty (the tail of an earlier
         # answer still playing) or the model's first slice arrived during the cache
-        # read, the phrase would land behind it and _cue_cut would then eat the answer.
+        # read, the phrase would land behind it and play late, after the answer.
         if q is None or not q.empty() or self._model_audio_n != n0:
             return None
         if only_while_waiting and not (w is self._wait and w is not None and w.waiting):
@@ -1821,7 +1811,16 @@ class JarvisLive:
                             self._wait_record(self._wait_call("model_audio"))
                             self._model_audio_n += 1
                             if self._cue_playing:
-                                self._cue_cut()    # only the phrase is queued; the model takes over
+                                # Finish the phrase and pause, never cut it: the playback
+                                # takes ~200 ms per batch plus 213 ms of output latency
+                                # (measured), so cutting at the first model audio left ~0.4 s
+                                # of the phrase in the device buffer, glued to the answer
+                                # (real test 2026-10-19). 0.2 s of silence (2 slices of
+                                # 2400 bytes) separates them; from here the flow is the
+                                # model's. interrupt() still drains everything.
+                                self._cue_playing = False
+                                for _ in range(2):
+                                    self.audio_in_queue.put_nowait(bytes(2400))
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
                             # Split into ~50 ms chunks so interrupt() stops audio within 50 ms

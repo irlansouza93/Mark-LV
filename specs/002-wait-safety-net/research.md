@@ -54,9 +54,16 @@ Levantado em 2026-10-19 lendo `main.py`, `core/llm_usage.py`, `core/voice_previe
   playback já liga `set_speaking(True)`, que **não envia o microfone** ao modelo e abre a cauda
   de eco depois — o modelo nunca "ouve" o "Um momento" e responde a ele; (c) o avatar articula a
   frase pelos visemas do próprio PCM; (d) zero código novo de dispositivo/plataforma.
-- **Cortar a frase:** no primeiro `response.data` do modelo com `_cue_playing`, esvaziar a fila
-  (só há frase nela) antes de enfileirar o modelo. O que já foi entregue ao dispositivo (≤ 1 lote
-  de 200 ms) termina; como é a mesma saída, o modelo toca logo depois — corte, não sobreposição.
+- ~~Cortar a frase~~ (versão até T029): esvaziar a fila no primeiro `response.data`. **Revisto no
+  teste real de 2026-10-19:** até ~0,4 s da frase já estava no buffer do dispositivo (lote de
+  200 ms + latência de saída de 213 ms medida), a frase saía cortada no meio da palavra e a
+  resposta entrava colada — o Irlan ouviu como "atropelo".
+- **Decision (T030): terminar e pausar.** Com `_cue_playing`, o 1º `response.data` do modelo
+  **não** esvazia a fila: enfileira primeiro ~0,2 s de silêncio (4800 bytes a 24 kHz int16) e
+  depois o áudio do modelo, que sai na ordem da fila — a frase termina inteira, pausa, resposta.
+  As frases de espera passam a ter ≈ 1–1,5 s (validação: ≤ 2,2 s após aparar), então o atraso
+  máximo que isso impõe à resposta é ~2,4 s, num pedido que já esperou ≥ 4 s. A captura pelo
+  Live pede ritmo natural e ágil no `system_instruction`.
 - **Fim da frase sem resposta:** hoje o playback só chama `set_speaking(False)` com
   `_turn_done_event` setado; com a frase, o microfone ficaria preso. O ramo de timeout do
   playback passa a liberar também quando `_cue_playing` e a fila esvaziou, e o vigia recoloca o

@@ -282,29 +282,29 @@ BCP47 = {"pt": "pt-BR", "en": "en-US", "es": "es-US", "fr": "fr-FR",
 # hears from a session that has gone quiet.
 TEXTS: dict[str, dict[str, list[str]]] = {
     "hold": {
-        "pt": ["Só um momento, já vejo isso.",
-               "Um instante, estou verificando para você.",
-               "Deixa eu conferir isso rapidinho.",
-               "Estou cuidando disso, só um segundo.",
-               "Já estou vendo isso, um momento."],
-        "en": ["Just a moment, I'm checking that now.",
-               "One second, let me look into that.",
-               "Hold on a moment, I'm on it."],
-        "es": ["Un momento, ya lo estoy revisando.",
-               "Dame un segundo, lo voy a comprobar.",
-               "Espera un momento, me ocupo de eso."],
-        "fr": ["Un instant, je vérifie cela tout de suite.",
-               "Une seconde, je regarde ça pour vous.",
-               "Laissez-moi vérifier cela un instant."],
-        "de": ["Einen Moment bitte, ich prüfe das kurz.",
-               "Ich schaue mir das gleich an, einen Augenblick.",
-               "Gib mir bitte kurz einen Moment dafür."],
-        "it": ["Un momento, sto controllando subito.",
-               "Dammi un secondo, lo verifico adesso.",
-               "Solo un attimo, me ne occupo io."],
-        "tr": ["Bir saniye bekle, hemen kontrol ediyorum.",
+        "pt": ["Só um momento, por favor.",
+               "Um instante, já vejo isso.",
+               "Deixa eu ver isso aqui.",
+               "Só um segundo, já vejo.",
+               "Peraí, já vou ver isso."],
+        "en": ["Just a moment, one second.",
+               "One second, checking that now.",
+               "Hold on, let me look."],
+        "es": ["Un momento, ya lo miro.",
+               "Dame un segundo, lo reviso.",
+               "Espera un momento, ya veo."],
+        "fr": ["Un instant, je regarde ça.",
+               "Une seconde, je vérifie ça.",
+               "Je regarde ça, un instant."],
+        "de": ["Einen Moment, ich schaue nach.",
+               "Gleich, ich prüfe das kurz.",
+               "Gib mir kurz einen Moment."],
+        "it": ["Un momento, lo controllo subito.",
+               "Dammi un secondo, controllo subito.",
+               "Solo un attimo, guardo subito."],
+        "tr": ["Bir saniye bekle, hemen bakıyorum.",
                "Bir dakika, buna hemen bakıyorum.",
-               "Hemen ilgileniyorum, bir an lütfen bekle."],
+               "Bir an bekle, hemen kontrol ediyorum."],
     },
     "giveup": {
         "pt": ["Desculpe, não consegui responder. Pode repetir?",
@@ -328,7 +328,9 @@ TEXTS: dict[str, dict[str, list[str]]] = {
 # Spoken seconds allowed after trimming the silence at both ends (R4b): under 0.6 s the
 # TTS clipped the sentence; over the maximum it padded it with silence (10.5 s measured
 # for a 2 s phrase) or read the instruction aloud.
-_DURATION_S = {"hold": (0.6, 4.5), "giveup": (0.6, 6.0)}
+# "hold" tops at 2.2 s (T030): the cue ends by the time a typical answer starts, so the
+# model's voice does not land on top of the phrase's tail (real test 2026-10-19).
+_DURATION_S = {"hold": (0.6, 2.2), "giveup": (0.6, 6.0)}
 _SILENCE = 0.02                 # samples under 2% of the absolute peak are silence
 
 _last_variant: dict[str, int] = {}      # kind -> variant played last (pcm_for avoids repeating it)
@@ -345,9 +347,9 @@ def phrase_path(kind: str, index: int, voice: str, lang: str, src: str = "tts") 
     """``src`` = ``live`` (captured from the Live model, the voice of the conversation) or
     ``tts`` (the TTS ladder, the reserve)."""
     from core import voice_preview          # CACHE_DIR is read at call time (tests swap it)
-    # "v3": the v1/v2 files (TTS only, no source tag) are never read again; they can be
-    # deleted by hand.
-    return voice_preview.CACHE_DIR / f"wait_v3_{src}_{kind}_{index}_{voice}_{lang}.wav"
+    # "v4": shorter "hold" phrases (T030); the v1-v3 files are never read again and can
+    # be deleted by hand.
+    return voice_preview.CACHE_DIR / f"wait_v4_{src}_{kind}_{index}_{voice}_{lang}.wav"
 
 
 def _to_rate(pcm: np.ndarray, rate: int) -> np.ndarray:
@@ -470,7 +472,7 @@ def _live_config(voice: str, lang: str) -> dict:
         "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": voice}}},
         "output_audio_transcription": {},
         "system_instruction": ("You are a speech engine. When the user sends a line, say exactly "
-                               f"that line, word for word, in {name}, and nothing else."),
+                               f"that line, word for word, in {name}, at a natural, brisk pace, and nothing else."),
     }
 
 
@@ -579,7 +581,7 @@ def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None 
 
     Returns the thread, or None when nothing is missing. The cache is by voice, not by
     model: changing ``LIVE_MODEL`` (or wanting new takes) means deleting
-    ``config/voice_cache/wait_v3_live_*``. ``synth``/``connect`` are injectable for tests;
+    ``config/voice_cache/wait_v4_live_*``. ``synth``/``connect`` are injectable for tests;
     the default ``synth`` is the picker's TTS with the bare text and the language code.
     """
     variants = [(kind, i, text) for kind in TEXTS

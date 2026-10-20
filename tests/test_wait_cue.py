@@ -349,8 +349,8 @@ def _speech(seconds, lead=0.0, trail=0.0, level=3000):
 
 
 def test_phrase_path_name_is_versioned_indexed_and_tagged_with_its_source(cache):
-    assert wait_cue.phrase_path("hold", 2, "Charon", "pt", "tts") == cache / "wait_v3_tts_hold_2_Charon_pt.wav"
-    assert wait_cue.phrase_path("hold", 2, "Charon", "pt", "live") == cache / "wait_v3_live_hold_2_Charon_pt.wav"
+    assert wait_cue.phrase_path("hold", 2, "Charon", "pt", "tts") == cache / "wait_v4_tts_hold_2_Charon_pt.wav"
+    assert wait_cue.phrase_path("hold", 2, "Charon", "pt", "live") == cache / "wait_v4_live_hold_2_Charon_pt.wav"
     assert wait_cue.phrase_path("hold", 2, "Charon", "pt") == wait_cue.phrase_path("hold", 2, "Charon", "pt", "tts")
 
 
@@ -443,7 +443,12 @@ def test_texts_cover_the_seven_picker_languages_with_enough_words():
             assert all(len(v.split()) >= 5 for v in variants), (kind, l)
             assert len(set(variants)) == len(variants)
     assert len(wait_cue.TEXTS["hold"]["pt"]) == 5 and len(wait_cue.TEXTS["giveup"]["pt"]) == 3
-    assert wait_cue.TEXTS["hold"]["pt"][0] == "Só um momento, já vejo isso."
+    assert wait_cue.TEXTS["hold"]["pt"] == [
+        "Só um momento, por favor.", "Um instante, já vejo isso.", "Deixa eu ver isso aqui.",
+        "Só um segundo, já vejo.", "Peraí, já vou ver isso."]
+    # R3 (T030): a wait phrase is short so it ends before the answer starts
+    for l in langs:
+        assert all(len(v.split()) <= 7 for v in wait_cue.TEXTS["hold"][l]), l
     assert wait_cue.TEXTS["giveup"]["pt"][0] == "Desculpe, não consegui responder. Pode repetir?"
 
 
@@ -537,7 +542,7 @@ def test_prefetch_unknown_language_falls_back_to_english_text_and_us_english(cac
 
 # ── generated audio is validated before it is cached (R4b) ───────────────────
 @pytest.mark.parametrize("kind,seconds,ok", [
-    ("hold", 0.5, False), ("hold", 0.7, True), ("hold", 4.4, True), ("hold", 4.7, False),
+    ("hold", 0.5, False), ("hold", 0.7, True), ("hold", 2.2, True), ("hold", 2.3, False),
     ("giveup", 0.5, False), ("giveup", 5.9, True), ("giveup", 6.3, False),
 ])
 def test_prefetch_validates_speech_duration(cache, kind, seconds, ok):
@@ -743,6 +748,7 @@ def test_live_capture_config_has_voice_transcription_and_a_speech_engine_prompt_
     assert cfg["output_audio_transcription"] == {}
     si = cfg["system_instruction"]
     assert "speech engine" in si and "word for word" in si and "Portuguese" in si
+    assert "natural, brisk pace" in si
 
 
 def test_live_capture_logs_one_oneshot_usage_row_per_line(monkeypatch):
@@ -808,6 +814,10 @@ def test_pcm_for_prefers_live_over_tts_and_falls_back(cache):
     assert wait_cue.pcm_for("hold", "Charon", "pt")[0].tolist() == [1]      # live unreadable -> tts
 
 
+def test_hold_phrases_are_short_but_giveup_keeps_its_length():
+    assert wait_cue._DURATION_S == {"hold": (0.6, 2.2), "giveup": (0.6, 6.0)}
+
+
 def test_prefetch_with_live_model_writes_live_files_and_skips_tts(cache):
     fake, calls = _live_for(), []
     wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls), live_model="live-m", connect=fake).join(5)
@@ -846,8 +856,8 @@ def test_prefetch_live_audio_outside_duration_is_rejected(cache):
     wait_cue.prefetch("Charon", "pt", on_error=lambda k, m: errors.append(k),
                       synth=_synth_ok(), live_model="m", connect=fake).join(5)
     assert len(errors) == 8
-    assert not list(cache.glob("wait_v3_live_*"))
-    assert len(list(cache.glob("wait_v3_tts_*"))) == 8
+    assert not list(cache.glob("wait_v4_live_*"))
+    assert len(list(cache.glob("wait_v4_tts_*"))) == 8
 
 
 def test_prefetch_connect_failure_reports_live_once_and_uses_tts(cache):
@@ -863,7 +873,7 @@ def test_prefetch_tries_live_once_per_run_for_each_voice_and_language(cache):
     fake = FakeLive(_echo, connect_error=RuntimeError("quota"))
     for _ in range(2):
         wait_cue.prefetch("Charon", "pt", synth=_synth_ok(), live_model="m", connect=fake).join(5)
-        for f in cache.glob("wait_v3_tts_*"):
+        for f in cache.glob("wait_v4_tts_*"):
             f.unlink()                      # force "missing" again; the Live attempt is already spent
     assert len(fake.connects) == 1
     wait_cue.prefetch("Charon", "en", synth=_synth_ok(), live_model="m", connect=fake).join(5)
@@ -884,5 +894,5 @@ def test_prefetch_live_failure_leaves_existing_tts_files_alone(cache):
     calls = []
     th = wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls), live_model="m", connect=fake)
     th.join(5)
-    assert calls == [] and len(list(cache.glob("wait_v3_tts_*"))) == 8
+    assert calls == [] and len(list(cache.glob("wait_v4_tts_*"))) == 8
     assert wait_cue.pcm_for("hold", "Charon", "pt")[1] == "voice"

@@ -46,6 +46,7 @@ Quem usa o resultado:
 - Observado pelo Irlan: a frase de espera saiu "misturada em inglês e italiano" (transcrita como "A momento."). Medido em seguida: com instrução de estilo o TTS lê a instrução em voz alta ou enche de silêncio (6–10 s); frase curta ("Um instante.") sai em inglês mesmo com o idioma fixado; frase completa sem instrução, com o idioma da fala `pt-BR`, sai em português do Brasil em 2,2 s. → A: as frases são geradas **só com o texto**, com o idioma BCP-47 do usuário (`pt-BR` para português), cada uma com **pelo menos 5 palavras**; áudio gerado fora da faixa de duração esperada é descartado como falha.
 - Q: A frase de espera pode variar para não ficar monótona? → A: Sim: várias frases por tipo (5 de espera e 3 de desistência em pt-BR; 3 e 2 nas outras línguas), sorteadas entre as que estão em cache, nunca a mesma duas vezes seguidas.
 - Observado pelo Irlan: as frases em pt-BR soaram com outra voz que a da conversa (o TTS é outro modelo, mesmo com o nome de voz igual). → A: as frases são geradas pelo **próprio modelo Live, na voz da sessão**, conferidas pela transcrição; o TTS fica como reserva e o tom como último recurso.
+- Observado pelo Irlan no teste seguinte: a frase "atropelou" o começo da resposta (respostas chegaram aos 5,7 e 6,3 s, com a frase de ~2,3 s iniciada aos 4 s; o corte deixava ~0,4 s de frase no buffer da placa e a resposta entrava colada). → A: a frase nunca é cortada: termina, pausa curta (~0,2 s) e a resposta começa; frases de espera encurtadas para ≈ 1–1,5 s.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -167,7 +168,9 @@ uso; ele deve listar a latência de cada tipo e quantas vezes o HUD e as frases 
   microfone é silenciado; o JARVIS volta a dormir; a sessão cai. Se o usuário volta a falar
   antes de qualquer resposta, a contagem recomeça do fim da nova fala (não é cancelamento).
 - **FR-005**: As frases da rede de segurança (espera e desistência) NUNCA podem tocar por cima da
-  voz do JARVIS; se a voz do modelo começar durante uma delas, a frase MUST ser cortada.
+  voz do JARVIS. Se a resposta do modelo chegar durante uma delas, a frase MUST terminar
+  (nunca é cortada no meio), seguida de uma pausa curta (~0,2 s), e só então a resposta toca.
+  Para isso as frases de espera são curtas (≈ 1–1,5 s; no máximo 2,2 s após aparar o silêncio).
 - **FR-006**: A rede de segurança MUST NOT acrescentar nada ao que é enviado ao modelo (nenhum
   token a mais por conexão ou por turno) e MUST NOT bloquear os loops de áudio nem a interface.
 - **FR-007**: Cada turno de voz MUST registrar, junto do registro de uso já existente, a latência
