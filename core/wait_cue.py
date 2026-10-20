@@ -22,12 +22,23 @@ phrase or give-up is only ever emitted while the episode is still open.
 
 Measuring never switches off: with ``enabled = False`` the watchdog emits no actions
 but still returns records, so the usage report keeps its numbers.
+
+The second half of the module is the spoken part (R3/R4): the two short phrases
+("hold" and "giveup") live as WAVs in ``config/voice_cache`` next to the picker's
+samples, generated once per voice and language by a daemon thread, and played by
+``main.py`` through the same output queue as the model's voice. Playing never
+calls the API: with no cached file it plays a soft tone, so the wait net still
+makes a sound when the network, the key or the quota is the very reason for the wait.
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
+
+import numpy as np
 
 _IDLE, _WAITING, _EXCHANGE = "idle", "waiting", "exchange"
 
@@ -226,3 +237,120 @@ class WaitWatchdog:
     @property
     def thinking_shown(self) -> bool:
         return self._thinking
+
+
+# ── spoken phrases (spec 002 US2, research R3/R4) ────────────────────────────
+RATE = 24000        # = RECEIVE_SAMPLE_RATE in main.py: the playback stream's rate
+
+# Same seven languages as the voice picker (voice_preview._PHRASES). Short on
+# purpose: "hold" must end before a typical answer starts, "giveup" is the last
+# thing the user hears from a session that has gone quiet.
+TEXTS: dict[str, dict[str, str]] = {
+    "hold": {
+        "pt": "Um momento.",
+        "en": "One moment.",
+        "es": "Un momento.",
+        "fr": "Un instant.",
+        "de": "Einen Moment.",
+        "it": "Un momento.",
+        "tr": "Bir saniye.",
+    },
+    "giveup": {
+        "pt": "Não consegui responder. Pode repetir?",
+        "en": "I couldn't answer. Could you repeat that?",
+        "es": "No pude responder. ¿Puedes repetirlo?",
+        "fr": "Je n'ai pas pu répondre. Pouvez-vous répéter ?",
+        "de": "Ich konnte nicht antworten. Kannst du das wiederholen?",
+        "it": "Non sono riuscito a rispondere. Puoi ripetere?",
+        "tr": "Cevap veremedim. Tekrar eder misin?",
+    },
+}
+_STYLE = "Say this calmly and briefly, like a butler:"
+
+
+def phrase_path(kind: str, voice: str, lang: str) -> Path:
+    from core import voice_preview          # CACHE_DIR is read at call time (tests swap it)
+    return voice_preview.CACHE_DIR / f"wait_{kind}_{voice}_{lang}.wav"
+
+
+def _to_rate(pcm: np.ndarray, rate: int) -> np.ndarray:
+    """Linear interpolation to 24 kHz: a spoken phrase does not need better, and
+    numpy is already a dependency (no resampler library for two sentences)."""
+    if rate == RATE or pcm.size == 0:
+        return pcm.astype(np.int16, copy=False)
+    n = int(round(pcm.size * RATE / rate))
+    x = np.linspace(0.0, pcm.size - 1, num=max(n, 1))
+    return np.interp(x, np.arange(pcm.size), pcm.astype(np.float32)).astype(np.int16)
+
+
+def load_phrase(kind: str, voice: str, lang: str) -> np.ndarray | None:
+    """Cached phrase as int16 @ 24 kHz, or None (no file, or one that cannot be read)."""
+    from core import voice_preview
+    path = phrase_path(kind, voice, lang)
+    try:
+        if not path.exists():
+            return None
+        pcm, rate = voice_preview._read_wav(path)
+        return _to_rate(pcm, rate) if pcm.size else None
+    except Exception:
+        return None            # a corrupt file is the same as no file: fall back to the tone
+
+
+def tone() -> np.ndarray:
+    """Two soft sine beeps, 880 -> 660 Hz, ~300 ms in all (120 ms each, 60 ms gap),
+    faded in and out so there is no click, peak 0.25 of full scale. Pure numpy:
+    it cannot fail, which is the point of a fallback."""
+    def beep(freq: float, ms: int) -> np.ndarray:
+        n = RATE * ms // 1000
+        t = np.arange(n) / RATE
+        fade = np.minimum(1.0, np.minimum(np.arange(n), np.arange(n)[::-1]) / (RATE * 0.015))
+        return 0.25 * np.sin(2 * np.pi * freq * t) * fade
+    gap = np.zeros(RATE * 60 // 1000)
+    wave_ = np.concatenate([beep(880.0, 120), gap, beep(660.0, 120)])
+    return (wave_ * 32767).astype(np.int16)
+
+
+def pcm_for(kind: str, voice: str, lang: str) -> tuple[np.ndarray, str]:
+    """What to play for ``kind``: ``(pcm, "voice")`` from the cache, else ``(tone(), "tone")``.
+    Never touches the network and never raises."""
+    try:
+        pcm = load_phrase(kind, voice, lang)
+    except Exception:
+        pcm = None
+    if pcm is not None:
+        return pcm, "voice"
+    return tone(), "tone"
+
+
+def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None = None,
+             synth: Callable | None = None) -> threading.Thread | None:
+    """Generate the phrases that are not cached yet, off the calling thread.
+
+    Returns the daemon thread, or None when everything is already on disk (the
+    common case after the first run). A failure of one kind goes to
+    ``on_error(kind, message)`` and leaves no file behind (``_write_wav`` is
+    atomic), so the next connection simply tries again. ``synth`` is injectable
+    for tests; the default is the picker's TTS ladder with a butler-like style.
+    """
+    missing = [k for k in TEXTS if not phrase_path(k, voice, lang).exists()]
+    if not missing:
+        return None
+
+    def work() -> None:
+        from core import voice_preview
+        fn = synth or voice_preview._synthesise
+        for kind in missing:
+            try:
+                text = TEXTS[kind].get(lang) or TEXTS[kind]["en"]
+                pcm, rate = fn(voice, lang, text=text, style=_STYLE)
+                voice_preview._write_wav(phrase_path(kind, voice, lang), _to_rate(pcm, rate), RATE)
+            except Exception as e:
+                if on_error:
+                    try:
+                        on_error(kind, str(e)[:160])
+                    except Exception:
+                        pass
+
+    th = threading.Thread(target=work, daemon=True, name="wait-cue-prefetch")
+    th.start()
+    return th

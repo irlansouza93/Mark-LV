@@ -122,7 +122,11 @@ def _read_wav(path: Path) -> tuple[np.ndarray, int]:
                 w.getframerate())
 
 
-def _synthesise(voice: str, lang: str) -> tuple[np.ndarray, int]:
+def _synthesise(voice: str, lang: str, text: str | None = None,
+                style: str | None = None) -> tuple[np.ndarray, int]:
+    """One TTS call down the model ladder. ``text`` replaces the picker sentence and
+    ``style`` the "warmly, like a friend" prefix (the wait phrases in core/wait_cue
+    want a calm, brief tone); with neither, the behaviour is the picker's."""
     from google import genai
     from google.genai import types
     from core import gemini
@@ -131,7 +135,8 @@ def _synthesise(voice: str, lang: str) -> tuple[np.ndarray, int]:
     if not key:
         raise RuntimeError("no Gemini API key")
     cl = genai.Client(api_key=key, http_options={"timeout": _TIMEOUT_MS})
-    text = _PHRASES.get(lang, _PHRASES["en"])
+    text = text if text is not None else _PHRASES.get(lang, _PHRASES["en"])
+    style = style if style is not None else "Say this warmly and naturally, like a friend:"
     cfg = types.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
@@ -143,7 +148,7 @@ def _synthesise(voice: str, lang: str) -> tuple[np.ndarray, int]:
         try:
             r = cl.models.generate_content(
                 model=model,
-                contents=f"Say this warmly and naturally, like a friend: {text}",
+                contents=f"{style} {text}",
                 config=cfg)
             llm_usage.record_tts(model, "ok", int((time.monotonic() - t0) * 1000), getattr(r, "usage_metadata", None))
             part = r.candidates[0].content.parts[0].inline_data

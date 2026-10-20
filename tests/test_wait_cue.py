@@ -315,3 +315,130 @@ def test_events_never_raise_even_if_the_clock_does():
     wd.phrase_played("voice")
     assert wd.model_audio() is None and wd.turn_complete() is None and wd.cancel("x") is None
     assert wd.tick() == ([], None)
+
+
+# ── phrases (spec 002 US2): cache, tone, prefetch — never the network ────────
+import threading
+import wave
+
+import numpy as np
+
+from core import voice_preview, wait_cue
+
+
+@pytest.fixture
+def cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_preview, "CACHE_DIR", tmp_path)
+    return tmp_path
+
+
+def _put_wav(path, samples, rate):
+    voice_preview._write_wav(path, np.asarray(samples, dtype=np.int16), rate)
+
+
+def test_phrase_path_name(cache):
+    assert wait_cue.phrase_path("hold", "Charon", "pt") == cache / "wait_hold_Charon_pt.wav"
+
+
+def test_load_phrase_none_without_file_and_int16_24k_with_it(cache):
+    assert wait_cue.load_phrase("hold", "Charon", "pt") is None
+    _put_wav(wait_cue.phrase_path("hold", "Charon", "pt"), [1, -2, 3, 4], 24000)
+    pcm = wait_cue.load_phrase("hold", "Charon", "pt")
+    assert pcm.dtype == np.int16 and pcm.tolist() == [1, -2, 3, 4]
+
+
+def test_load_phrase_resamples_16k_to_24k(cache):
+    _put_wav(wait_cue.phrase_path("hold", "Charon", "pt"), np.arange(1600) % 100, 16000)
+    pcm = wait_cue.load_phrase("hold", "Charon", "pt")
+    assert pcm.dtype == np.int16 and abs(len(pcm) - 2400) <= 1      # 0.1 s at 24 kHz
+
+
+def test_load_phrase_corrupt_file_is_none_not_an_error(cache):
+    wait_cue.phrase_path("hold", "Charon", "pt").write_bytes(b"not a wav")
+    assert wait_cue.load_phrase("hold", "Charon", "pt") is None
+
+
+def test_tone_is_int16_24k_about_300ms_audible_and_soft():
+    t = wait_cue.tone()
+    assert t.dtype == np.int16 and wait_cue.RATE == 24000
+    assert 0.25 <= len(t) / wait_cue.RATE <= 0.35
+    peak = int(np.abs(t.astype(np.int32)).max())
+    assert 0 < peak <= 0.3 * 32767
+
+
+def test_pcm_for_voice_with_cache_and_tone_without(cache):
+    pcm, how = wait_cue.pcm_for("hold", "Charon", "pt")
+    assert how == "tone" and pcm.dtype == np.int16 and len(pcm) == len(wait_cue.tone())
+    _put_wav(wait_cue.phrase_path("hold", "Charon", "pt"), [5, 6, 7], 24000)
+    pcm, how = wait_cue.pcm_for("hold", "Charon", "pt")
+    assert how == "voice" and pcm.tolist() == [5, 6, 7]
+
+
+def test_pcm_for_never_raises_on_unknown_kind(cache):
+    pcm, how = wait_cue.pcm_for("nonsense", "Charon", "pt")
+    assert how == "tone"
+
+
+def test_texts_cover_the_seven_picker_languages():
+    langs = set(voice_preview._PHRASES)
+    assert langs == {"pt", "en", "es", "fr", "de", "it", "tr"}
+    for kind in ("hold", "giveup"):
+        assert set(wait_cue.TEXTS[kind]) == langs
+        assert all(wait_cue.TEXTS[kind][l].strip() for l in langs)
+    assert wait_cue.TEXTS["hold"]["pt"] == "Um momento."
+    assert wait_cue.TEXTS["giveup"]["pt"] == "Não consegui responder. Pode repetir?"
+
+
+def test_prefetch_generates_only_what_is_missing(cache):
+    calls = []
+
+    def synth(voice, lang, text=None, style=None):
+        calls.append((voice, lang, text))
+        return np.ones(2400, dtype=np.int16), 24000
+
+    th = wait_cue.prefetch("Charon", "pt", synth=synth)
+    th.join(5)
+    assert sorted(c[2] for c in calls) == sorted(
+        [wait_cue.TEXTS["hold"]["pt"], wait_cue.TEXTS["giveup"]["pt"]])
+    assert wait_cue.load_phrase("hold", "Charon", "pt") is not None
+    assert wait_cue.load_phrase("giveup", "Charon", "pt") is not None
+    # all cached now: nothing to do, no thread
+    assert wait_cue.prefetch("Charon", "pt", synth=synth) is None
+    # one missing: only that one is generated
+    wait_cue.phrase_path("giveup", "Charon", "pt").unlink()
+    calls.clear()
+    wait_cue.prefetch("Charon", "pt", synth=synth).join(5)
+    assert [c[2] for c in calls] == [wait_cue.TEXTS["giveup"]["pt"]]
+
+
+def test_prefetch_runs_off_the_calling_thread_as_daemon(cache):
+    seen = []
+    th = wait_cue.prefetch("Charon", "en", synth=lambda *a, **k: (
+        seen.append(threading.current_thread()) or (np.ones(10, dtype=np.int16), 24000)))
+    th.join(5)
+    assert th.daemon and seen and all(t is not threading.current_thread() for t in seen)
+
+
+def test_prefetch_synth_failure_reports_and_leaves_no_partial_file(cache):
+    errors = []
+
+    def synth(voice, lang, text=None, style=None):
+        raise RuntimeError("quota")
+
+    wait_cue.prefetch("Charon", "pt", on_error=lambda k, m: errors.append((k, m)),
+                      synth=synth).join(5)
+    assert {k for k, _ in errors} == {"hold", "giveup"}
+    assert all("quota" in m for _, m in errors)
+    assert list(cache.iterdir()) == []
+    assert wait_cue.load_phrase("hold", "Charon", "pt") is None
+
+
+def test_prefetch_without_on_error_swallows_failure(cache):
+    wait_cue.prefetch("Charon", "pt", synth=lambda *a, **k: 1 / 0).join(5)
+
+
+def test_prefetch_unknown_language_falls_back_to_english_text(cache):
+    got = []
+    wait_cue.prefetch("Charon", "xx", synth=lambda v, l, text=None, style=None: (
+        got.append(text) or (np.ones(10, dtype=np.int16), 24000))).join(5)
+    assert wait_cue.TEXTS["hold"]["en"] in got
