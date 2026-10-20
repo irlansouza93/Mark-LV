@@ -102,7 +102,7 @@ principal com o Irlan. Nenhum agente faz commit/push/PR.
 - [x] T030 Terminar e pausar em vez de cortar ([research.md R3](research.md#r3--onde-tocar-as-frases), FR-005): `main.py` (1º áudio do modelo com `_cue_playing` → silêncio de ~0,2 s + áudio, sem esvaziar a fila); `core/wait_cue.py` (frases de espera curtas, validação `hold` ≤ 2,2 s, ritmo ágil no prompt da captura Live, cache `wait_v4_…` para regerar); testes antes
 - [x] T031 Bloqueio firme do microfone durante a frase ([research.md R3b](research.md#r3b--eco-da-frase-chegando-ao-modelo-teste-ab-de-2026-10-19)): `cue_mute_s()` puro e detecção `echo_suspect` em `core/wait_cue.py` (testes antes); `main.py` guarda `_cue_mute_until` em `_wait_play_cue` e o callback do microfone descarta blocos até lá; `echo_suspect` no record
 - [x] T026 Teste real com o Irlan, num único roteiro: [quickstart.md](quickstart.md) §2–3 (fora do sandbox, com a chave). Se o caso 5 (fala não dirigida) vier `gave_up`, aplicar a contingência de [research.md R2](research.md#r2--proactive-audio-o-modelo-pode-escolher-ficar-calado) e registrar a decisão lá
-- [ ] T027 Commit na branch `002-wait-safety-net` e PR para `irlan-dev` com o resultado de cada linha do roteiro e o que não pôde ser verificado (Princípio II); conferir `git status` sem segredos
+- [x] T027 Commit na branch `002-wait-safety-net` e PR para `irlan-dev` com o resultado de cada linha do roteiro e o que não pôde ser verificado (Princípio II); conferir `git status` sem segredos
 
 ---
 
