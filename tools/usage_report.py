@@ -154,7 +154,8 @@ def _wait_lines(ws: dict, current) -> list[str]:
             out.append(f"  {label}: 0")
     f, o = ws["fired"], ws["outcomes"]
     out.append(f"  rede agiu: pensando {f['thinking']} · \"Um momento\" {f['phrase']} (tom {f['phrase_tone']})"
-               f" · desistência {f['gave_up']} · sem resposta {o['no_reply']}")
+               f" · desistência {f['gave_up']} · sem resposta {o['no_reply']}"
+               + (f" · eco suspeito {ws['echo_suspect']}" if ws.get("echo_suspect") else ""))
     s = ws["suggested"]
     if s is None:
         out.append(f"  sugestão de limites: {ws['suggest_note']}")

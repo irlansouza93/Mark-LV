@@ -896,3 +896,94 @@ def test_prefetch_live_failure_leaves_existing_tts_files_alone(cache):
     th.join(5)
     assert calls == [] and len(list(cache.glob("wait_v4_tts_*"))) == 8
     assert wait_cue.pcm_for("hold", "Charon", "pt")[1] == "voice"
+
+
+# ── the phrase must not reach the model through the mic (R3b, T031) ──────────
+def test_cue_mute_is_duration_plus_output_latency_plus_margin():
+    assert wait_cue.CUE_MUTE_MARGIN_S == 0.6
+    assert wait_cue.cue_mute_s(1.5, 0.213) == pytest.approx(1.5 + 0.213 + 0.6)
+
+
+@pytest.mark.parametrize("lat", [None, -0.1, float("nan"), "x"])
+def test_cue_mute_uses_a_conservative_latency_when_the_measure_is_unusable(lat):
+    assert wait_cue.cue_mute_s(1.0, lat) == pytest.approx(1.0 + 0.25 + 0.6)
+
+
+def test_pcm_for_with_text_returns_the_phrase_that_was_chosen(cache):
+    _put_wav(wait_cue.phrase_path("hold", 2, "Charon", "pt", "live"), [5, 6], 24000)
+    pcm, how, text = wait_cue.pcm_for("hold", "Charon", "pt", with_text=True)
+    assert how == "voice" and text == wait_cue.TEXTS["hold"]["pt"][2] == "Deixa eu ver isso aqui."
+    assert wait_cue.pcm_for("hold", "Charon", "pt")[1] == "voice"         # two values, as before
+    _, how, text = wait_cue.pcm_for("giveup", "Charon", "pt", with_text=True)
+    assert (how, text) == ("tone", "")
+
+
+@pytest.mark.parametrize("heard,ok", [
+    ("isso aqui", True),                                  # the tail of the phrase
+    ("Deixa eu ver isso aqui", True),
+    ("deixa eu ver isso", True),
+    ("qual a previsão do tempo", False),
+    ("", False),
+    ("aqui", False),                                      # one word contained is not enough
+])
+def test_echo_suspect_recognises_our_own_phrase_coming_back(heard, ok):
+    assert wait_cue.echo_suspect(heard, "Deixa eu ver isso aqui.") is ok
+
+
+def test_echo_suspect_never_for_the_tone_or_the_same_text_as_the_question():
+    assert wait_cue.echo_suspect("qual a previsão do tempo", "") is False
+    assert wait_cue.echo_suspect("qual a previsão do tempo", "qual a previsão do tempo") is True
+
+
+def test_record_carries_echo_suspect_false_by_default_and_true_when_marked(wd, clk):
+    wd.user_speech()
+    clk.adv(1.0)
+    assert wd.model_audio()["echo_suspect"] is False
+    wd.turn_complete()
+    wd.user_speech()
+    clk.adv(5.0)
+    wd.tick()
+    wd.phrase_heard_back()
+    clk.adv(1.0)
+    assert wd.model_audio()["echo_suspect"] is True
+    wd.turn_complete()
+    wd.user_speech()                                      # next episode starts clean
+    clk.adv(1.0)
+    assert wd.model_audio()["echo_suspect"] is False
+
+
+def test_echo_suspect_reaches_every_kind_of_record(wd, clk):
+    wd.user_speech()
+    wd.phrase_heard_back()
+    assert wd.turn_complete()["echo_suspect"] is True
+    wd.user_speech()
+    assert wd.cancel("interrupt")["echo_suspect"] is False
+    wd.user_speech()
+    wd.phrase_heard_back()
+    clk.adv(25.0)
+    assert wd.tick()[1]["echo_suspect"] is True
+
+
+def test_phrase_heard_back_outside_an_episode_is_a_no_op(wd):
+    wd.phrase_heard_back()
+
+
+# summary and report
+def test_wait_summary_counts_echo_suspect_episodes():
+    from core import llm_usage
+    base = {"kind": "voice_wait", "outcome": "audio", "latency_ms": 1000}
+    got = llm_usage.wait_summary([dict(base, echo_suspect=True), dict(base, echo_suspect=False),
+                                  dict(base), dict(base, echo_suspect=True)])
+    assert got["echo_suspect"] == 2
+    assert llm_usage.wait_summary([])["echo_suspect"] == 0
+
+
+def test_usage_report_shows_echo_suspect_only_when_there_is_one():
+    from tools import usage_report
+    base = {"kind": "voice_wait", "outcome": "audio", "latency_ms": 1000}
+    from core import llm_usage
+    quiet = usage_report._wait_lines(llm_usage.wait_summary([base]), None)
+    assert not any("eco suspeito" in l for l in quiet)
+    loud = usage_report._wait_lines(llm_usage.wait_summary([dict(base, echo_suspect=True)] * 3), None)
+    line = [l for l in loud if "rede agiu" in l][0]
+    assert line.endswith(" · eco suspeito 3")

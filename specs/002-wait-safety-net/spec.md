@@ -47,6 +47,7 @@ Quem usa o resultado:
 - Q: A frase de espera pode variar para não ficar monótona? → A: Sim: várias frases por tipo (5 de espera e 3 de desistência em pt-BR; 3 e 2 nas outras línguas), sorteadas entre as que estão em cache, nunca a mesma duas vezes seguidas.
 - Observado pelo Irlan: as frases em pt-BR soaram com outra voz que a da conversa (o TTS é outro modelo, mesmo com o nome de voz igual). → A: as frases são geradas pelo **próprio modelo Live, na voz da sessão**, conferidas pela transcrição; o TTS fica como reserva e o tom como último recurso.
 - Observado pelo Irlan no teste seguinte: a frase "atropelou" o começo da resposta (respostas chegaram aos 5,7 e 6,3 s, com a frase de ~2,3 s iniciada aos 4 s; o corte deixava ~0,4 s de frase no buffer da placa e a resposta entrava colada). → A: a frase nunca é cortada: termina, pausa curta (~0,2 s) e a resposta começa; frases de espera encurtadas para ≈ 1–1,5 s.
+- Observado pelo Irlan: depois da pesquisa o JARVIS "repetia que ia procurar" em vez de dar o resultado; no teste A/B, com a frase desligada, deu o resultado normalmente. Causa provável: o fim da frase vazava para o microfone e chegava ao modelo como fala do usuário. → A: o microfone fica **bloqueado** durante a frase inteira + latência da placa + 0,6 s; nada da frase pode chegar ao modelo (reforça FR-006).
 
 ## User Scenarios & Testing *(mandatory)*
 

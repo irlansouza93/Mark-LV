@@ -125,6 +125,7 @@ class WaitWatchdog:
         self._tool_seen = False
         self._last_tool_end: float | None = None
         self._gave_up = False
+        self._echo_suspect = False               # our own phrase came back through the mic (R3b)
 
     def _open(self, source: str, now: float) -> None:
         self._reset_episode()
@@ -143,6 +144,7 @@ class WaitWatchdog:
             "thinking": self._thinking_ever,
             "phrase": self._phrase if self._phrase in ("voice", "tone") else None,
             "gave_up": self._gave_up,
+            "echo_suspect": self._echo_suspect,
             "enabled": lim.enabled,
             "limits": {"thinking_ms": lim.thinking_ms, "phrase_ms": lim.phrase_ms,
                        "give_up_ms": lim.give_up_ms},
@@ -224,6 +226,13 @@ class WaitWatchdog:
         """What the caller actually played for the "phrase" action: ``voice`` or ``tone``."""
         if self._state == _WAITING and how in ("voice", "tone"):
             self._phrase = how
+
+    @_safe()
+    def phrase_heard_back(self) -> None:
+        """The server transcribed our own wait phrase as if the user had said it: the
+        record of the open episode says so (diagnostic only, no text kept)."""
+        if self._state == _WAITING:
+            self._echo_suspect = True
 
     # ── tick (every ~100 ms) ─────────────────────────────────────────────────
     @_safe(default=lambda: ([], None))
@@ -394,9 +403,11 @@ def tone() -> np.ndarray:
     return (wave_ * 32767).astype(np.int16)
 
 
-def pcm_for(kind: str, voice: str, lang: str,
-            rng: random.Random | None = None) -> tuple[np.ndarray, str]:
+def pcm_for(kind: str, voice: str, lang: str, rng: random.Random | None = None,
+            with_text: bool = False):
     """What to play for ``kind``: ``(pcm, "voice")`` from the cache, else ``(tone(), "tone")``.
+    ``with_text=True`` adds the phrase text as a third value (``""`` for the tone): the
+    caller compares it with what the server heard back (``echo_suspect``).
 
     Draws among the variants that are cached, never the one played last for this
     ``kind`` (with a single cached variant it repeats). Never touches the network and
@@ -412,11 +423,11 @@ def pcm_for(kind: str, voice: str, lang: str,
             pcm = load_phrase(kind, i, voice, lang)
             if pcm is not None:
                 _last_variant[kind] = i
-                return pcm, "voice"
+                return (pcm, "voice", _variants(kind, lang)[i]) if with_text else (pcm, "voice")
             pool.remove(i)         # unreadable file: try another variant
     except Exception:
         pass
-    return tone(), "tone"
+    return (tone(), "tone", "") if with_text else (tone(), "tone")
 
 
 def _trim_and_check(kind: str, pcm: np.ndarray, rate: int) -> np.ndarray:
@@ -459,6 +470,40 @@ def _matches(expected: str, heard: str) -> bool:
     """The Live transcript says the phrase that was asked for (>= 0.85 similarity)."""
     a, b = _norm(expected), _norm(heard)
     return bool(a and b) and difflib.SequenceMatcher(None, a, b).ratio() >= _MATCH_MIN
+
+
+# ── the phrase must not come back through the microphone (R3b, T031) ─────────
+# A/B test of 2026-10-19: with the phrase on, the model "repeated that it would look" after a
+# search instead of giving the result; with it off, it answered normally. The playback batches
+# 200 ms and the device adds 213 ms of output latency (both measured), so the tail of the
+# phrase is still audible after the queue empties; the 463 ms echo tail was not enough. It
+# reached the server as user speech in the middle of the tool call. So the mic is muted hard
+# for the phrase's length + the output latency + this margin.
+CUE_MUTE_MARGIN_S = 0.6
+_LATENCY_FALLBACK_S = 0.25      # a bit above the 213 ms measured, for when there is no measure
+_ECHO_RATIO = 0.6               # lower than _MATCH_MIN: the server hears a clipped, reverberated tail
+
+
+def cue_mute_s(duration_s: float, out_latency_s) -> float:
+    """Seconds the microphone stays muted from the moment the phrase is queued."""
+    try:
+        lat = float(out_latency_s)
+        if not lat >= 0.0:          # negative or NaN
+            lat = _LATENCY_FALLBACK_S
+    except (TypeError, ValueError):
+        lat = _LATENCY_FALLBACK_S
+    return float(duration_s) + lat + CUE_MUTE_MARGIN_S
+
+
+def echo_suspect(heard: str, played: str) -> bool:
+    """``heard`` (an input transcription) looks like the phrase we played: similar overall,
+    or a piece of it with at least two words (the transcript is usually only the tail)."""
+    a, b = _norm(heard), _norm(played)
+    if not a or not b:
+        return False
+    if len(a.split()) >= 2 and f" {a} " in f" {b} ":
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= _ECHO_RATIO
 
 
 def _live_config(voice: str, lang: str) -> dict:

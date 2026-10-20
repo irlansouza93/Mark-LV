@@ -142,6 +142,25 @@ Levantado em 2026-10-19 lendo `main.py`, `core/llm_usage.py`, `core/voice_previe
 - **Risco:** limite de sessões Live simultâneas no nível grátis; se a conexão extra for recusada,
   vale a reserva e a próxima execução tenta de novo.
 
+## R3b — Eco da frase chegando ao modelo (teste A/B de 2026-10-19)
+
+- **Observado:** com as frases capturadas do Live (voz idêntica), o 1º turno depois de duas
+  pesquisas durou só 5,4 s e 4,5 s (contra 10–48 s em ~25 pesquisas anteriores) e o Irlan ouviu o
+  JARVIS "repetir que ia procurar" em vez de dar o resultado. **A/B:** com a frase desligada
+  (`phrase_ms` 30 s), a mesma pesquisa deu o resultado normalmente → a frase é a causa.
+- **Mecanismo provável:** o playback libera o microfone ~0,1 s depois de a fila esvaziar, com a
+  cauda de eco de 463 ms; mas o dispositivo ainda tem frase no buffer (lote de 200 ms + latência
+  de saída). O fim da frase entra no microfone, vai ao servidor como **fala do usuário**
+  ("…isso aqui") no meio da ferramenta, e o modelo responde a essa "fala" em vez de entregar o
+  resultado. Um registro `late_transcript` às 22:48:35 é compatível com isso.
+- **Decision (T031):** **bloqueio firme do microfone** pela duração da frase + latência de saída
+  medida + 0,6 s de margem, contado do momento em que a frase é enfileirada; nesse intervalo
+  nenhum bloco do microfone vai ao modelo (nem passa pelo filtro de eco). Função pura
+  `cue_mute_s(duration_s, out_latency_s)` em `core/wait_cue.py`. Diagnóstico sem texto:
+  `echo_suspect: bool` no `voice_wait` quando chega `input_transcription` parecida com o texto
+  da frase tocada (mesma normalização do R4c, similaridade ≥ 0,6) até 3 s depois do fim do
+  bloqueio.
+
 ## R5 — Registro da latência
 
 - **Decision:** um registro novo `kind: "voice_wait"` por episódio, no mesmo `usage-AAAA-MM.jsonl`

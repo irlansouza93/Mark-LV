@@ -676,6 +676,7 @@ def wait_summary(records) -> dict:
     fired = {"thinking": 0, "phrase": 0, "phrase_tone": 0, "gave_up": 0}
     no_tool: list = []
     with_tool: list = []
+    echo = 0
     for r in records:
         if not isinstance(r, dict) or r.get("kind") != "voice_wait":
             continue
@@ -690,6 +691,8 @@ def wait_summary(records) -> dict:
                 fired["phrase_tone"] += 1
         if r.get("gave_up"):
             fired["gave_up"] += 1
+        if r.get("echo_suspect"):
+            echo += 1
         lat = _num(r.get("latency_ms"))
         if lat is not None:
             (with_tool if r.get("tool") else no_tool).append(lat)
@@ -708,4 +711,4 @@ def wait_summary(records) -> dict:
         note = f"dados insuficientes ({n} de {WAIT_MIN_EPISODES})"
     return {"episodes": episodes, "with_latency": n, "outcomes": outcomes,
             "no_tool": _wait_group(no_tool), "tool": _wait_group(with_tool),
-            "fired": fired, "suggested": suggested, "suggest_note": note}
+            "fired": fired, "echo_suspect": echo, "suggested": suggested, "suggest_note": note}

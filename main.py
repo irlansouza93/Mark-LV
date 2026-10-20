@@ -650,6 +650,9 @@ class JarvisLive:
         # "a cue is what is playing" must be known to cut it when the model answers
         # and to release the mic when it ends with no answer behind it.
         self._cue_playing = False
+        self._cue_mute_until = 0.0      # monotonic: mic blocks are dropped until then (R3b)
+        self._cue_echo_until = 0.0      # until then a transcript like the phrase is "echo"
+        self._cue_text = ""             # text of the phrase queued last ("" = the tone)
         self._model_audio_n = 0         # bumped per slice of model audio; see _wait_play_cue
         self._cue_voice   = ""          # voice/language of the CURRENT session: the cached
         self._cue_lang    = "en"        # phrase must match the voice the user hears
@@ -787,8 +790,8 @@ class JarvisLive:
         is dropped instead of being queued behind real audio."""
         w = self._wait
         n0 = self._model_audio_n
-        pcm, how = await asyncio.to_thread(
-            _wait_cue.pcm_for, kind, self._cue_voice, self._cue_lang)
+        pcm, how, text = await asyncio.to_thread(
+            _wait_cue.pcm_for, kind, self._cue_voice, self._cue_lang, None, True)
         q = self.audio_in_queue
         # Real audio always wins: if the queue is not empty (the tail of an earlier
         # answer still playing) or the model's first slice arrived during the cache
@@ -801,6 +804,12 @@ class JarvisLive:
         for i in range(0, len(data), 2400):     # 50 ms slices, like the receive loop
             q.put_nowait(data[i:i + 2400])
         self._cue_playing = True
+        # Hard mute of the mic while the phrase can still be heard (R3b): the A/B test of
+        # 2026-10-19 showed its tail reaching the server as user speech mid-tool-call.
+        self._cue_mute_until = time.monotonic() + _wait_cue.cue_mute_s(
+            len(data) / 2 / 24000, self._out_latency)
+        self._cue_text = text
+        self._cue_echo_until = self._cue_mute_until + 3.0
         return how
 
     def _wait_phrase_failed(self, voice: str, lang: str, kind: str, msg: str) -> None:
@@ -1078,6 +1087,7 @@ class JarvisLive:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
         self._cue_playing = False
+        self._cue_mute_until = 0.0      # the user wants to talk: the mic opens now
         self._wait_call_soon("cancel", "interrupt")
         q = self.audio_in_queue
         if q:
@@ -1526,6 +1536,12 @@ class JarvisLive:
                 # out until it can be tried on real hardware.
                 return
 
+            # The wait phrase may still be audible after the queue emptied (200 ms batch
+            # + 213 ms output latency, measured): its tail reached the server as user
+            # speech and the model answered it instead of the tool result (A/B 2026-10-19).
+            if time.monotonic() < self._cue_mute_until:
+                return
+
             # ── Echo tail ────────────────────────────────────────────────────
             # The speaking flag has dropped but the speakers have not finished.
             # Sending this to the model is how an assistant hears itself, decides
@@ -1858,11 +1874,17 @@ class JarvisLive:
                                 # Live has no end-of-speech event: the last input
                                 # transcription chunk is the anchor (spec 002, research R1).
                                 _w = self._wait
-                                _was_thinking = (_w is not None and _w.waiting
-                                                 and _w.thinking_shown and not self._cue_playing)
-                                self._wait_call("user_speech")
-                                if _was_thinking:       # spoke again: no longer "thinking"
-                                    self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
+                                if (time.monotonic() < self._cue_echo_until
+                                        and _wait_cue.echo_suspect(txt, self._cue_text)):
+                                    # Our own phrase heard back, not the user (R3b): it
+                                    # must not move the anchor; only the record says so.
+                                    self._wait_call("phrase_heard_back")
+                                else:
+                                    _was_thinking = (_w is not None and _w.waiting
+                                                     and _w.thinking_shown and not self._cue_playing)
+                                    self._wait_call("user_speech")
+                                    if _was_thinking:   # spoke again: no longer "thinking"
+                                        self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
 
                         if sc.turn_complete:
                             if self._turn_done_event:

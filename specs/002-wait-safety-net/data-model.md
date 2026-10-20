@@ -64,6 +64,7 @@ Campos comuns do registro de uso (`v`, `ts`, `app`, `pid`, `live_session`) vêm 
 | `gave_up` | bool | desistência acionada |
 | `enabled` | bool | rede ligada neste episódio |
 | `limits` | `{thinking_ms, phrase_ms, give_up_ms}` | limites em vigor |
+| `echo_suspect` | bool | chegou transcrição parecida com a frase tocada logo depois dela (R3b); só sim/não, sem texto |
 
 Retenção: a do arquivo de uso (12 meses, spec 001). Sem transcrição, sem dado pessoal.
 
