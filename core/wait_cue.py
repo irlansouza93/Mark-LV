@@ -32,6 +32,7 @@ makes a sound when the network, the key or the quota is the very reason for the 
 """
 from __future__ import annotations
 
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -41,6 +42,13 @@ from typing import Callable
 import numpy as np
 
 _IDLE, _WAITING, _EXCHANGE = "idle", "waiting", "exchange"
+
+# An episode that closes in under this many ms did not wait at all: the transcript of
+# the request reached us together with the first audio of the answer (the server sends
+# input_transcription late, sometimes after the answer has started). Real test of
+# 2026-10-19: 1 of 8 requests registered 1 ms. Counting it as a latency would drag the
+# percentiles (and the suggested limits) down, so it closes as ``cancelled`` instead.
+LATE_TRANSCRIPT_MS = 150
 
 
 @dataclass(frozen=True)
@@ -164,7 +172,11 @@ class WaitWatchdog:
         app itself sent text, e.g. proactive mode) it is a no-op: not an exchange."""
         if self._state != _WAITING:
             return None
-        rec = self._record("audio", latency_ms=round((self._clock() - self._anchor) * 1000))
+        latency_ms = round((self._clock() - self._anchor) * 1000)
+        if latency_ms < LATE_TRANSCRIPT_MS:
+            rec = self._record("cancelled", cancel_reason="late_transcript")
+        else:
+            rec = self._record("audio", latency_ms=latency_ms)
         self._state = _EXCHANGE
         return rec
 
@@ -248,38 +260,82 @@ class WaitWatchdog:
         return self._thinking
 
 
-# ── spoken phrases (spec 002 US2, research R3/R4) ────────────────────────────
+# ── spoken phrases (spec 002 US2, research R3/R4/R4b) ────────────────────────
 RATE = 24000        # = RECEIVE_SAMPLE_RATE in main.py: the playback stream's rate
 
-# Same seven languages as the voice picker (voice_preview._PHRASES). Short on
-# purpose: "hold" must end before a typical answer starts, "giveup" is the last
-# thing the user hears from a session that has gone quiet.
-TEXTS: dict[str, dict[str, str]] = {
+# Same seven languages as the voice picker (voice_preview._PHRASES). BCP-47 goes in the
+# TTS speech config: without it the accent drifts to English/Italian (R4b, measured).
+BCP47 = {"pt": "pt-BR", "en": "en-US", "es": "es-US", "fr": "fr-FR",
+         "de": "de-DE", "it": "it-IT", "tr": "tr-TR"}
+
+# Several variants per kind so the same sentence is not heard on every wait. Every one has
+# at least five words: shorter ones came out in the wrong language ("Um instante." ->
+# "Ohm's inch", 1.1 s) while "Só um momento, já vejo isso." is clean pt-BR in 2.2 s (R4b).
+# "hold" must end before a typical answer starts; "giveup" is the last thing the user
+# hears from a session that has gone quiet.
+TEXTS: dict[str, dict[str, list[str]]] = {
     "hold": {
-        "pt": "Um momento.",
-        "en": "One moment.",
-        "es": "Un momento.",
-        "fr": "Un instant.",
-        "de": "Einen Moment.",
-        "it": "Un momento.",
-        "tr": "Bir saniye.",
+        "pt": ["Só um momento, já vejo isso.",
+               "Um instante, estou verificando para você.",
+               "Deixa eu conferir isso rapidinho.",
+               "Estou cuidando disso, só um segundo.",
+               "Já estou vendo isso, um momento."],
+        "en": ["Just a moment, I'm checking that now.",
+               "One second, let me look into that.",
+               "Hold on a moment, I'm on it."],
+        "es": ["Un momento, ya lo estoy revisando.",
+               "Dame un segundo, lo voy a comprobar.",
+               "Espera un momento, me ocupo de eso."],
+        "fr": ["Un instant, je vérifie cela tout de suite.",
+               "Une seconde, je regarde ça pour vous.",
+               "Laissez-moi vérifier cela un instant."],
+        "de": ["Einen Moment bitte, ich prüfe das kurz.",
+               "Ich schaue mir das gleich an, einen Augenblick.",
+               "Gib mir bitte kurz einen Moment dafür."],
+        "it": ["Un momento, sto controllando subito.",
+               "Dammi un secondo, lo verifico adesso.",
+               "Solo un attimo, me ne occupo io."],
+        "tr": ["Bir saniye bekle, hemen kontrol ediyorum.",
+               "Bir dakika, buna hemen bakıyorum.",
+               "Hemen ilgileniyorum, bir an lütfen bekle."],
     },
     "giveup": {
-        "pt": "Não consegui responder. Pode repetir?",
-        "en": "I couldn't answer. Could you repeat that?",
-        "es": "No pude responder. ¿Puedes repetirlo?",
-        "fr": "Je n'ai pas pu répondre. Pouvez-vous répéter ?",
-        "de": "Ich konnte nicht antworten. Kannst du das wiederholen?",
-        "it": "Non sono riuscito a rispondere. Puoi ripetere?",
-        "tr": "Cevap veremedim. Tekrar eder misin?",
+        "pt": ["Desculpe, não consegui responder. Pode repetir?",
+               "Não recebi a resposta a tempo. Pode falar de novo?",
+               "Perdi o fio aqui. Pode repetir o pedido?"],
+        "en": ["Sorry, I couldn't answer that. Could you repeat?",
+               "I didn't get a reply in time. Please say that again."],
+        "es": ["Lo siento, no pude responder. ¿Puedes repetirlo?",
+               "No recibí la respuesta a tiempo. ¿Lo repites?"],
+        "fr": ["Désolé, je n'ai pas pu répondre. Pouvez-vous répéter ?",
+               "Je n'ai pas reçu la réponse à temps. Pouvez-vous répéter ?"],
+        "de": ["Entschuldigung, ich konnte nicht antworten. Kannst du das wiederholen?",
+               "Die Antwort kam nicht rechtzeitig. Kannst du es noch einmal sagen?"],
+        "it": ["Scusa, non sono riuscito a rispondere. Puoi ripetere?",
+               "Non ho ricevuto la risposta in tempo. Puoi ripetere?"],
+        "tr": ["Üzgünüm, cevap veremedim. Tekrar eder misin?",
+               "Yanıt zamanında gelmedi. Lütfen tekrar söyler misin?"],
     },
 }
-_STYLE = "Say this calmly and briefly, like a butler:"
+
+# Spoken seconds allowed after trimming the silence at both ends (R4b): under 0.6 s the
+# TTS clipped the sentence; over the maximum it padded it with silence (10.5 s measured
+# for a 2 s phrase) or read the instruction aloud.
+_DURATION_S = {"hold": (0.6, 4.5), "giveup": (0.6, 6.0)}
+_SILENCE = 0.02                 # samples under 2% of the absolute peak are silence
+
+_last_variant: dict[str, int] = {}      # kind -> variant played last (pcm_for avoids repeating it)
 
 
-def phrase_path(kind: str, voice: str, lang: str) -> Path:
+def _variants(kind: str, lang: str) -> list[str]:
+    return TEXTS[kind].get(lang) or TEXTS[kind]["en"]
+
+
+def phrase_path(kind: str, index: int, voice: str, lang: str) -> Path:
     from core import voice_preview          # CACHE_DIR is read at call time (tests swap it)
-    return voice_preview.CACHE_DIR / f"wait_{kind}_{voice}_{lang}.wav"
+    # "v2": the version-1 files ("wait_<kind>_<voice>_<lang>.wav") had the wrong accent
+    # and are never read again; they can be deleted by hand.
+    return voice_preview.CACHE_DIR / f"wait_v2_{kind}_{index}_{voice}_{lang}.wav"
 
 
 def _to_rate(pcm: np.ndarray, rate: int) -> np.ndarray:
@@ -292,10 +348,10 @@ def _to_rate(pcm: np.ndarray, rate: int) -> np.ndarray:
     return np.interp(x, np.arange(pcm.size), pcm.astype(np.float32)).astype(np.int16)
 
 
-def load_phrase(kind: str, voice: str, lang: str) -> np.ndarray | None:
+def load_phrase(kind: str, index: int, voice: str, lang: str) -> np.ndarray | None:
     """Cached phrase as int16 @ 24 kHz, or None (no file, or one that cannot be read)."""
     from core import voice_preview
-    path = phrase_path(kind, voice, lang)
+    path = phrase_path(kind, index, voice, lang)
     try:
         if not path.exists():
             return None
@@ -319,44 +375,76 @@ def tone() -> np.ndarray:
     return (wave_ * 32767).astype(np.int16)
 
 
-def pcm_for(kind: str, voice: str, lang: str) -> tuple[np.ndarray, str]:
+def pcm_for(kind: str, voice: str, lang: str,
+            rng: random.Random | None = None) -> tuple[np.ndarray, str]:
     """What to play for ``kind``: ``(pcm, "voice")`` from the cache, else ``(tone(), "tone")``.
-    Never touches the network and never raises."""
+
+    Draws among the variants that are cached, never the one played last for this
+    ``kind`` (with a single cached variant it repeats). Never touches the network and
+    never raises. ``rng`` is injectable for tests."""
     try:
-        pcm = load_phrase(kind, voice, lang)
+        pick = rng or random
+        cached = [i for i in range(len(_variants(kind, lang)))
+                  if phrase_path(kind, i, voice, lang).exists()]
+        last = _last_variant.get(kind)
+        pool = [i for i in cached if i != last] or cached
+        while pool:
+            i = pick.choice(pool)
+            pcm = load_phrase(kind, i, voice, lang)
+            if pcm is not None:
+                _last_variant[kind] = i
+                return pcm, "voice"
+            pool.remove(i)         # unreadable file: try another variant
     except Exception:
-        pcm = None
-    if pcm is not None:
-        return pcm, "voice"
+        pass
     return tone(), "tone"
+
+
+def _trim_and_check(kind: str, pcm: np.ndarray, rate: int) -> np.ndarray:
+    """Cut the silence at both ends and check the spoken length (R4b); raise
+    ``RuntimeError("phrase audio <dur>s outside <min>-<max>s")`` when it is wrong."""
+    lo, hi = _DURATION_S[kind]
+    mag = np.abs(pcm.astype(np.int32))
+    peak = int(mag.max()) if mag.size else 0
+    loud = np.nonzero(mag >= max(1, peak * _SILENCE))[0] if peak else np.array([], dtype=int)
+    trimmed = pcm[loud[0]:loud[-1] + 1] if loud.size else pcm[:0]
+    dur = len(trimmed) / rate
+    if not lo <= dur <= hi:
+        raise RuntimeError(f"phrase audio {dur:.1f}s outside {lo}-{hi}s")
+    return trimmed
 
 
 def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None = None,
              synth: Callable | None = None) -> threading.Thread | None:
-    """Generate the phrases that are not cached yet, off the calling thread.
+    """Generate the phrase variants that are not cached yet, off the calling thread.
 
     Returns the daemon thread, or None when everything is already on disk (the
-    common case after the first run). A failure of one kind goes to
-    ``on_error(kind, message)`` and leaves no file behind (``_write_wav`` is
-    atomic), so the next connection simply tries again. ``synth`` is injectable
-    for tests; the default is the picker's TTS ladder with a butler-like style.
+    common case after the first run). The audio is trimmed and its length checked
+    before it is written (a bad take is not cached); a failure of one variant goes to
+    ``on_error(kind, message)``, leaves no file behind (``_write_wav`` is atomic) and
+    does not stop the other variants, so the next connection simply tries again.
+    ``synth`` is injectable for tests; the default is the picker's TTS ladder with the
+    bare text and the language code (no style line: see ``voice_preview._synthesise``).
     """
     # An existing but unreadable or empty file counts as missing: otherwise a bad
     # cache would mean the tone forever, with nothing ever regenerating it.
-    missing = [k for k in TEXTS if load_phrase(k, voice, lang) is None]
+    missing = [(kind, i, text) for kind in TEXTS
+               for i, text in enumerate(_variants(kind, lang))
+               if load_phrase(kind, i, voice, lang) is None]
     if not missing:
         return None
 
     def work() -> None:
         from core import voice_preview
         fn = synth or voice_preview._synthesise
-        for kind in missing:
+        code = BCP47.get(lang, "en-US")
+        for kind, i, text in missing:
             try:
-                text = TEXTS[kind].get(lang) or TEXTS[kind]["en"]
-                pcm, rate = fn(voice, lang, text=text, style=_STYLE)
+                pcm, rate = fn(voice, lang, text=text, style=None, language_code=code)
                 if pcm is None or len(pcm) == 0:
                     raise RuntimeError("TTS returned no audio")
-                voice_preview._write_wav(phrase_path(kind, voice, lang), _to_rate(pcm, rate), RATE)
+                pcm = _trim_and_check(kind, pcm, rate)
+                voice_preview._write_wav(phrase_path(kind, i, voice, lang), _to_rate(pcm, rate), RATE)
             except Exception as e:
                 if on_error:
                     try:

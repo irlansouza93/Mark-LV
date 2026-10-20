@@ -41,6 +41,11 @@ Quem usa o resultado:
 - Q: Em esperas longas, depois do primeiro "Um momento.", há lembretes? → A: Não: a frase toca no máximo uma vez por turno; depois disso o HUD em "pensando" basta.
 - Q: O que o usuário percebe quando a espera chega à desistência (20 s sem nada, sem ferramenta)? → A: Uma segunda frase gravada ("Não consegui responder. Pode repetir?"), além do registro da falha e do HUD voltando a ouvir; sem reconectar a sessão.
 
+### Session 2026-10-19 (teste real)
+
+- Observado pelo Irlan: a frase de espera saiu "misturada em inglês e italiano" (transcrita como "A momento."). Medido em seguida: com instrução de estilo o TTS lê a instrução em voz alta ou enche de silêncio (6–10 s); frase curta ("Um instante.") sai em inglês mesmo com o idioma fixado; frase completa sem instrução, com o idioma da fala `pt-BR`, sai em português do Brasil em 2,2 s. → A: as frases são geradas **só com o texto**, com o idioma BCP-47 do usuário (`pt-BR` para português), cada uma com **pelo menos 5 palavras**; áudio gerado fora da faixa de duração esperada é descartado como falha.
+- Q: A frase de espera pode variar para não ficar monótona? → A: Sim: várias frases por tipo (5 de espera e 3 de desistência em pt-BR; 3 e 2 nas outras línguas), sorteadas entre as que estão em cache, nunca a mesma duas vezes seguidas.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Sinal visual de que foi ouvido (Priority: P1)
@@ -149,8 +154,10 @@ uso; ele deve listar a latência de cada tipo e quantas vezes o HUD e as frases 
 - **FR-002**: Se nenhum áudio do modelo chegar até o **limite do HUD** depois do fim do turno, o
   HUD MUST entrar no estado "pensando".
 - **FR-003**: Se nenhum áudio do modelo chegar até o **limite da frase**, o app MUST tocar, no
-  dispositivo de saída escolhido pelo usuário, uma **frase de espera** curta ("Um momento.", no
-  idioma do usuário) gravada na voz atual do JARVIS — no máximo uma vez por turno. A frase é
+  dispositivo de saída escolhido pelo usuário, uma **frase de espera** curta (ex.: "Só um momento, já vejo isso.",
+  no idioma do usuário, com a pronúncia desse idioma — português do Brasil para o Irlan) gravada
+  na voz atual do JARVIS — no máximo uma vez por turno. Há várias frases por tipo, sorteadas sem
+  repetir a anterior. A frase é
   gerada uma única vez por voz e idioma, fora do caminho do turno, e guardada em cache local;
   tocar não chama o modelo. Se a frase ainda não existir no cache (primeira vez, sem rede, voz
   recém-trocada), toca um tom curto sintetizado no app.

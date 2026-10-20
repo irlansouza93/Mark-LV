@@ -78,6 +78,32 @@ Levantado em 2026-10-19 lendo `main.py`, `core/llm_usage.py`, `core/voice_previe
   + uma linha "SYS: wait phrase unavailable … using a tone" (uma vez por voz/idioma por sessão).
 - **Reamostragem:** se o TTS devolver taxa ≠ 24 kHz, interpolação linear com numpy.
 
+## R4b — Pronúncia e variação (teste real de 2026-10-19)
+
+- **Medido** (TTS `gemini-3.8-flash-lite-tts`, voz Laomedeia, transcrição pelo `gemini-2.5-flash`):
+
+  | Pedido ao TTS | Duração | O que saiu |
+  |---|---|---|
+  | `"Say this calmly and briefly, like a butler: Um momento."` (versão 1) | 5,3 s | "A momento." — sotaque inglês/italiano (relato do Irlan) |
+  | instrução em português + texto | 6,2–7,1 s | **lê a instrução** em voz alta |
+  | instrução em inglês separada + texto + `language_code="pt-BR"` | 10,5 s | certo, mas cheio de silêncio |
+  | `"Um instante."` + `pt-BR` | 1,1 s | "Ohm's inch" (inglês) — frase curta demais para o idioma |
+  | `"Só um momento, já vejo isso."` + `pt-BR`, sem instrução | **2,2 s** | português do Brasil ✔ |
+
+- **Decision:** `_synthesise(..., text=..., style=None, language_code=...)` — sem prefixo de estilo
+  quando `style is None and text` foi dado (o seletor de voz continua igual); `SpeechConfig`
+  recebe `language_code` (BCP-47: pt→`pt-BR`, en→`en-US`, es→`es-US`, fr→`fr-FR`, de→`de-DE`,
+  it→`it-IT`, tr→`tr-TR`). Cada variante tem ≥ 5 palavras. Áudio gerado é **validado**: fala
+  aparada nas pontas (silêncio < 2% do pico) e duração entre 0,6 s e 4,5 s (espera) / 6 s
+  (desistência); fora disso → `on_error` e nada gravado.
+- **Variação:** `TEXTS[kind][lang]` vira lista; cache
+  `wait_v2_<kind>_<i>_<voice>_<lang>.wav` (o `v2` invalida as frases da versão 1, que ficam
+  órfãs e podem ser apagadas); `pcm_for` sorteia entre as variantes em cache, evitando repetir a
+  última de cada tipo.
+- **Latência falsa:** em 1 dos 8 pedidos do teste a transcrição chegou junto com o áudio da
+  resposta (latência registrada: 1 ms). Episódio fechado em < 150 ms vira
+  `cancelled/late_transcript` e não entra nos percentis.
+
 ## R5 — Registro da latência
 
 - **Decision:** um registro novo `kind: "voice_wait"` por episódio, no mesmo `usage-AAAA-MM.jsonl`

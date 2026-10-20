@@ -123,10 +123,15 @@ def _read_wav(path: Path) -> tuple[np.ndarray, int]:
 
 
 def _synthesise(voice: str, lang: str, text: str | None = None,
-                style: str | None = None) -> tuple[np.ndarray, int]:
-    """One TTS call down the model ladder. ``text`` replaces the picker sentence and
-    ``style`` the "warmly, like a friend" prefix (the wait phrases in core/wait_cue
-    want a calm, brief tone); with neither, the behaviour is the picker's."""
+                style: str | None = None,
+                language_code: str | None = None) -> tuple[np.ndarray, int]:
+    """One TTS call down the model ladder. ``text`` replaces the picker sentence.
+    ``style`` replaces the "warmly, like a friend" prefix; with an explicit ``text``
+    and no ``style`` the text goes alone, because any instruction around it is either
+    read aloud or drags the accent (measured 2026-10-19, spec 002 R4b: an English
+    style line made "Um momento." come out as "A momento." in 5.3 s). ``language_code``
+    (BCP-47, e.g. "pt-BR") pins the accent in the speech config. With none of the
+    three, the behaviour is the picker's."""
     from google import genai
     from google.genai import types
     from core import gemini
@@ -135,12 +140,17 @@ def _synthesise(voice: str, lang: str, text: str | None = None,
     if not key:
         raise RuntimeError("no Gemini API key")
     cl = genai.Client(api_key=key, http_options={"timeout": _TIMEOUT_MS})
-    text = text if text is not None else _PHRASES.get(lang, _PHRASES["en"])
-    style = style if style is not None else "Say this warmly and naturally, like a friend:"
+    explicit_text = text is not None
+    text = text if explicit_text else _PHRASES.get(lang, _PHRASES["en"])
+    if style is None and not explicit_text:
+        style = "Say this warmly and naturally, like a friend:"
+    speech_kw = {"voice_config": types.VoiceConfig(
+        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice))}
+    if language_code:
+        speech_kw["language_code"] = language_code
     cfg = types.GenerateContentConfig(
         response_modalities=["AUDIO"],
-        speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
-            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice))),
+        speech_config=types.SpeechConfig(**speech_kw),
     )
     last = "no TTS model answered"
     for model in TTS_MODELS:
@@ -148,7 +158,7 @@ def _synthesise(voice: str, lang: str, text: str | None = None,
         try:
             r = cl.models.generate_content(
                 model=model,
-                contents=f"{style} {text}",
+                contents=f"{style} {text}" if style else text,
                 config=cfg)
             llm_usage.record_tts(model, "ok", int((time.monotonic() - t0) * 1000), getattr(r, "usage_metadata", None))
             part = r.candidates[0].content.parts[0].inline_data
