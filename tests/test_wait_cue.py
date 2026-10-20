@@ -331,6 +331,7 @@ from core import voice_preview, wait_cue
 def cache(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_preview, "CACHE_DIR", tmp_path)
     wait_cue._last_variant.clear()
+    wait_cue._live_tried.clear()
     return tmp_path
 
 
@@ -347,8 +348,10 @@ def _speech(seconds, lead=0.0, trail=0.0, level=3000):
     return np.concatenate([pad(lead), body, pad(trail)])
 
 
-def test_phrase_path_name_is_versioned_and_indexed(cache):
-    assert wait_cue.phrase_path("hold", 2, "Charon", "pt") == cache / "wait_v2_hold_2_Charon_pt.wav"
+def test_phrase_path_name_is_versioned_indexed_and_tagged_with_its_source(cache):
+    assert wait_cue.phrase_path("hold", 2, "Charon", "pt", "tts") == cache / "wait_v3_tts_hold_2_Charon_pt.wav"
+    assert wait_cue.phrase_path("hold", 2, "Charon", "pt", "live") == cache / "wait_v3_live_hold_2_Charon_pt.wav"
+    assert wait_cue.phrase_path("hold", 2, "Charon", "pt") == wait_cue.phrase_path("hold", 2, "Charon", "pt", "tts")
 
 
 def test_load_phrase_none_without_file_and_int16_24k_with_it(cache):
@@ -390,8 +393,9 @@ def test_pcm_for_never_raises_on_unknown_kind(cache):
     assert how == "tone"
 
 
-def test_pcm_for_ignores_the_version_1_files(cache):
-    _put_wav(cache / "wait_hold_Charon_pt.wav", [5, 6, 7], 24000)       # the old name
+def test_pcm_for_ignores_the_version_1_and_2_files(cache):
+    _put_wav(cache / "wait_hold_Charon_pt.wav", [5, 6, 7], 24000)       # the old names
+    _put_wav(cache / "wait_v2_hold_0_Charon_pt.wav", [5, 6, 7], 24000)
     assert wait_cue.pcm_for("hold", "Charon", "pt")[1] == "tone"
 
 
@@ -650,3 +654,235 @@ def test_late_transcript_stays_out_of_the_percentiles(wd, clk):
     rec = {"kind": "voice_wait", **wd.model_audio()}
     got = llm_usage.wait_summary([rec])
     assert got["outcomes"]["cancelled"] == 1 and got["with_latency"] == 0
+
+
+# ── phrases captured from the Live model itself (R4c) — fake connection, no network ──
+import asyncio
+from types import SimpleNamespace as NS
+
+
+def _resp(data=None, text=None, done=False, usage=None):
+    sc = NS(output_transcription=NS(text=text) if text is not None else None, turn_complete=done)
+    return NS(data=data, server_content=sc, usage_metadata=usage)
+
+
+def _turn(text_heard, seconds=1.5, usage=None):
+    """What the Live model sends for one line: audio in two chunks, the transcript in two
+    chunks, then turn_complete."""
+    pcm = _speech(seconds).tobytes()
+    half = len(pcm) // 2
+    words = text_heard.split(" ")
+    mid = len(words) // 2
+    return [_resp(data=pcm[:half]), _resp(text=" ".join(words[:mid]) + " "),
+            _resp(data=pcm[half:]), _resp(text=" ".join(words[mid:])),
+            _resp(done=True, usage=usage)]
+
+
+class FakeLive:
+    """connect(model, config) -> async context manager; ``script(text)`` gives the list of
+    responses for a line (or "hang", or an exception to raise)."""
+
+    def __init__(self, script, connect_error=None):
+        self.script, self.connect_error = script, connect_error
+        self.connects, self.sent = [], []
+        self.exited = False
+
+    def __call__(self, model, config):
+        self.connects.append((model, config))
+        outer = self
+
+        class CM:
+            async def __aenter__(self_):
+                if outer.connect_error:
+                    raise outer.connect_error
+                return NS(send_client_content=outer._send, receive=outer._receive)
+
+            async def __aexit__(self_, *a):
+                outer.exited = True
+                return False
+        return CM()
+
+    async def _send(self, *, turns, turn_complete):
+        self.sent.append((turns, turn_complete))
+
+    async def _receive(self):
+        text = self.sent[-1][0]["parts"][0]["text"]
+        out = self.script(text)
+        if isinstance(out, Exception):
+            raise out
+        if out == "hang":
+            await asyncio.sleep(60)
+        for r in out:
+            yield r
+
+
+def _echo(text):
+    return _turn(text)
+
+
+def test_live_capture_one_connection_for_all_lines_and_returns_pcm_and_transcript():
+    fake = FakeLive(_echo)
+    texts = ["Só um momento, já vejo isso.", "Estou cuidando disso, só um segundo."]
+    got = wait_cue.live_capture(texts, model="live-m", voice="Charon", lang="pt", connect=fake)
+    assert len(fake.connects) == 1 and fake.connects[0][0] == "live-m" and fake.exited
+    assert [s[0] for s in fake.sent] == [{"role": "user", "parts": [{"text": t}]} for t in texts]
+    assert all(s[1] is True for s in fake.sent)
+    for (pcm, heard, err), t in zip(got, texts):
+        assert err is None and pcm.dtype == np.int16 and len(pcm) == int(24000 * 1.5)
+        assert wait_cue._matches(t, heard)
+
+
+def test_live_capture_config_has_voice_transcription_and_a_speech_engine_prompt_no_tools():
+    fake = FakeLive(_echo)
+    wait_cue.live_capture(["Só um momento, já vejo isso."], model="m", voice="Laomedeia",
+                          lang="pt", connect=fake)
+    cfg = fake.connects[0][1]
+    assert cfg["response_modalities"] == ["AUDIO"]
+    assert cfg["speech_config"]["voice_config"]["prebuilt_voice_config"]["voice_name"] == "Laomedeia"
+    assert "language_code" not in cfg["speech_config"] and "tools" not in cfg
+    assert cfg["output_audio_transcription"] == {}
+    si = cfg["system_instruction"]
+    assert "speech engine" in si and "word for word" in si and "Portuguese" in si
+
+
+def test_live_capture_logs_one_oneshot_usage_row_per_line(monkeypatch):
+    from core import llm_usage
+    rows = []
+    monkeypatch.setattr(llm_usage, "record_oneshot", lambda *a, **k: rows.append(a))
+    um = NS(total_token_count=42)
+    fake = FakeLive(lambda t: _turn("so um momento", usage=um))
+    wait_cue.live_capture(["a", "b"], model="live-m", voice="Charon", lang="pt", connect=fake)
+    assert len(rows) == 2
+    model, tier, result, latency, usage = rows[0]
+    assert model == "live-m" and tier is None and result == "ok"
+    assert isinstance(latency, int) and usage is um
+
+
+def test_live_capture_connect_failure_marks_every_line_and_never_raises():
+    fake = FakeLive(_echo, connect_error=RuntimeError("429 quota"))
+    got = wait_cue.live_capture(["a", "b"], model="m", voice="V", lang="pt", connect=fake)
+    assert [g[0] for g in got] == [None, None]
+    assert all(g[2].startswith("connect:") and "429" in g[2] for g in got)
+
+
+def test_live_capture_timeout_on_a_line_skips_the_rest_but_keeps_the_earlier_ones():
+    fake = FakeLive(lambda t: "hang" if t == "b" else _echo(t))
+    got = wait_cue.live_capture(["a", "b", "c"], model="m", voice="V", lang="pt",
+                                connect=fake, timeout_s=0.2)
+    assert got[0][2] is None and got[0][0] is not None
+    assert got[1][0] is None and "timeout" in got[1][2]
+    assert got[2][0] is None and got[2][2]            # not sent on a session left mid-turn
+    assert len(fake.sent) == 2
+
+
+def test_live_capture_no_audio_is_an_error_for_that_line():
+    fake = FakeLive(lambda t: [_resp(text="hola"), _resp(done=True)])
+    (pcm, heard, err), = wait_cue.live_capture(["hola"], model="m", voice="V", lang="es", connect=fake)
+    assert pcm is None and heard == "hola" and "no audio" in err
+
+
+@pytest.mark.parametrize("expected,heard,ok", [
+    ("Só um momento, já vejo isso.", "so um momento ja vejo isso", True),
+    ("Só um momento, já vejo isso.", "Só um momento, já vejo isso.", True),
+    ("Desculpe, não consegui responder. Pode repetir?", "Desculpe não consegui responder pode repetir", True),
+    ("Só um momento, já vejo isso.", "A momento", False),
+    ("Só um momento, já vejo isso.", "Estou cuidando disso, só um segundo.", False),
+    ("Só um momento, já vejo isso.", "", False),
+])
+def test_matches_normalises_and_needs_85_percent_similarity(expected, heard, ok):
+    assert wait_cue._matches(expected, heard) is ok
+
+
+# prefetch with the Live model first, TTS after
+def _live_for(heard=None, seconds=1.5):
+    """A fake Live that repeats every requested line (or ``heard(line)``)."""
+    return FakeLive(lambda t: _turn((heard(t) if heard else t), seconds=seconds))
+
+
+def test_pcm_for_prefers_live_over_tts_and_falls_back(cache):
+    _put_wav(wait_cue.phrase_path("hold", 0, "Charon", "pt", "tts"), [1], 24000)
+    assert wait_cue.pcm_for("hold", "Charon", "pt")[0].tolist() == [1]
+    _put_wav(wait_cue.phrase_path("hold", 0, "Charon", "pt", "live"), [2], 24000)
+    assert wait_cue.pcm_for("hold", "Charon", "pt")[0].tolist() == [2]
+    wait_cue.phrase_path("hold", 0, "Charon", "pt", "live").write_bytes(b"corrupt")
+    assert wait_cue.pcm_for("hold", "Charon", "pt")[0].tolist() == [1]      # live unreadable -> tts
+
+
+def test_prefetch_with_live_model_writes_live_files_and_skips_tts(cache):
+    fake, calls = _live_for(), []
+    wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls), live_model="live-m", connect=fake).join(5)
+    assert len(fake.connects) == 1 and calls == []
+    for kind in ("hold", "giveup"):
+        for i in range(len(wait_cue.TEXTS[kind]["pt"])):
+            assert wait_cue.phrase_path(kind, i, "Charon", "pt", "live").exists()
+            assert not wait_cue.phrase_path(kind, i, "Charon", "pt", "tts").exists()
+    # everything is on disk now
+    assert wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls), live_model="live-m", connect=fake) is None
+
+
+def test_prefetch_without_live_model_is_tts_only_as_before(cache):
+    calls = []
+    wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls)).join(5)
+    assert len(calls) == 8
+    assert wait_cue.phrase_path("hold", 0, "Charon", "pt", "tts").exists()
+    assert not wait_cue.phrase_path("hold", 0, "Charon", "pt", "live").exists()
+
+
+def test_prefetch_live_mismatch_is_reported_and_that_variant_falls_to_tts(cache):
+    first = wait_cue.TEXTS["hold"]["pt"][0]
+    fake = _live_for(heard=lambda t: "A momento" if t == first else t)
+    errors, calls = [], []
+    wait_cue.prefetch("Charon", "pt", on_error=lambda k, m: errors.append((k, m)),
+                      synth=_synth_ok(calls), live_model="m", connect=fake).join(5)
+    assert [k for k, _ in errors] == ["hold"]
+    assert not wait_cue.phrase_path("hold", 0, "Charon", "pt", "live").exists()
+    assert wait_cue.phrase_path("hold", 0, "Charon", "pt", "tts").exists()
+    assert [c["text"] for c in calls] == [first]
+
+
+def test_prefetch_live_audio_outside_duration_is_rejected(cache):
+    fake = _live_for(seconds=0.2)
+    errors = []
+    wait_cue.prefetch("Charon", "pt", on_error=lambda k, m: errors.append(k),
+                      synth=_synth_ok(), live_model="m", connect=fake).join(5)
+    assert len(errors) == 8
+    assert not list(cache.glob("wait_v3_live_*"))
+    assert len(list(cache.glob("wait_v3_tts_*"))) == 8
+
+
+def test_prefetch_connect_failure_reports_live_once_and_uses_tts(cache):
+    fake = FakeLive(_echo, connect_error=RuntimeError("quota"))
+    errors, calls = [], []
+    wait_cue.prefetch("Charon", "pt", on_error=lambda k, m: errors.append((k, m)),
+                      synth=_synth_ok(calls), live_model="m", connect=fake).join(5)
+    assert [k for k, _ in errors] == ["live"] and "quota" in errors[0][1]
+    assert len(calls) == 8
+
+
+def test_prefetch_tries_live_once_per_run_for_each_voice_and_language(cache):
+    fake = FakeLive(_echo, connect_error=RuntimeError("quota"))
+    for _ in range(2):
+        wait_cue.prefetch("Charon", "pt", synth=_synth_ok(), live_model="m", connect=fake).join(5)
+        for f in cache.glob("wait_v3_tts_*"):
+            f.unlink()                      # force "missing" again; the Live attempt is already spent
+    assert len(fake.connects) == 1
+    wait_cue.prefetch("Charon", "en", synth=_synth_ok(), live_model="m", connect=fake).join(5)
+    assert len(fake.connects) == 2
+
+
+def test_prefetch_asks_live_only_for_variants_without_a_live_file(cache):
+    _put_wav(wait_cue.phrase_path("hold", 0, "Charon", "pt", "live"), _speech(1.0), 24000)
+    fake = _live_for()
+    wait_cue.prefetch("Charon", "pt", synth=_synth_ok(), live_model="m", connect=fake).join(5)
+    asked = [s[0]["parts"][0]["text"] for s in fake.sent]
+    assert wait_cue.TEXTS["hold"]["pt"][0] not in asked and len(asked) == 7
+
+
+def test_prefetch_live_failure_leaves_existing_tts_files_alone(cache):
+    wait_cue.prefetch("Charon", "pt", synth=_synth_ok()).join(5)        # tts cache filled
+    fake = FakeLive(_echo, connect_error=RuntimeError("quota"))
+    calls = []
+    th = wait_cue.prefetch("Charon", "pt", synth=_synth_ok(calls), live_model="m", connect=fake)
+    th.join(5)
+    assert calls == [] and len(list(cache.glob("wait_v3_tts_*"))) == 8
+    assert wait_cue.pcm_for("hold", "Charon", "pt")[1] == "voice"

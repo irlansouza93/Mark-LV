@@ -29,12 +29,19 @@ samples, generated once per voice and language by a daemon thread, and played by
 ``main.py`` through the same output queue as the model's voice. Playing never
 calls the API: with no cached file it plays a soft tone, so the wait net still
 makes a sound when the network, the key or the quota is the very reason for the wait.
+
+The phrases come from the Live model itself, in the voice of the conversation (R4c); the
+TTS ladder is the reserve and the tone the last resort. See ``prefetch``.
 """
 from __future__ import annotations
 
+import asyncio
+import difflib
 import random
+import re
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -331,11 +338,16 @@ def _variants(kind: str, lang: str) -> list[str]:
     return TEXTS[kind].get(lang) or TEXTS[kind]["en"]
 
 
-def phrase_path(kind: str, index: int, voice: str, lang: str) -> Path:
+_SOURCES = ("live", "tts")      # preference order: the conversation's own model first
+
+
+def phrase_path(kind: str, index: int, voice: str, lang: str, src: str = "tts") -> Path:
+    """``src`` = ``live`` (captured from the Live model, the voice of the conversation) or
+    ``tts`` (the TTS ladder, the reserve)."""
     from core import voice_preview          # CACHE_DIR is read at call time (tests swap it)
-    # "v2": the version-1 files ("wait_<kind>_<voice>_<lang>.wav") had the wrong accent
-    # and are never read again; they can be deleted by hand.
-    return voice_preview.CACHE_DIR / f"wait_v2_{kind}_{index}_{voice}_{lang}.wav"
+    # "v3": the v1/v2 files (TTS only, no source tag) are never read again; they can be
+    # deleted by hand.
+    return voice_preview.CACHE_DIR / f"wait_v3_{src}_{kind}_{index}_{voice}_{lang}.wav"
 
 
 def _to_rate(pcm: np.ndarray, rate: int) -> np.ndarray:
@@ -348,17 +360,22 @@ def _to_rate(pcm: np.ndarray, rate: int) -> np.ndarray:
     return np.interp(x, np.arange(pcm.size), pcm.astype(np.float32)).astype(np.int16)
 
 
-def load_phrase(kind: str, index: int, voice: str, lang: str) -> np.ndarray | None:
-    """Cached phrase as int16 @ 24 kHz, or None (no file, or one that cannot be read)."""
+def load_phrase(kind: str, index: int, voice: str, lang: str,
+                src: str | None = None) -> np.ndarray | None:
+    """Cached phrase as int16 @ 24 kHz, or None (no file, or one that cannot be read).
+    ``src=None`` prefers the ``live`` file and falls back to ``tts``."""
     from core import voice_preview
-    path = phrase_path(kind, index, voice, lang)
-    try:
-        if not path.exists():
-            return None
-        pcm, rate = voice_preview._read_wav(path)
-        return _to_rate(pcm, rate) if pcm.size else None
-    except Exception:
-        return None            # a corrupt file is the same as no file: fall back to the tone
+    for one in ((src,) if src else _SOURCES):
+        path = phrase_path(kind, index, voice, lang, one)
+        try:
+            if not path.exists():
+                continue
+            pcm, rate = voice_preview._read_wav(path)
+            if pcm.size:
+                return _to_rate(pcm, rate)
+        except Exception:
+            continue           # a corrupt file is the same as no file: next source, then the tone
+    return None
 
 
 def tone() -> np.ndarray:
@@ -385,7 +402,7 @@ def pcm_for(kind: str, voice: str, lang: str,
     try:
         pick = rng or random
         cached = [i for i in range(len(_variants(kind, lang)))
-                  if phrase_path(kind, i, voice, lang).exists()]
+                  if any(phrase_path(kind, i, voice, lang, src).exists() for src in _SOURCES)]
         last = _last_variant.get(kind)
         pool = [i for i in cached if i != last] or cached
         while pool:
@@ -414,43 +431,215 @@ def _trim_and_check(kind: str, pcm: np.ndarray, rate: int) -> np.ndarray:
     return trimmed
 
 
+# ── the voice of the conversation: capture the phrases from the Live model (R4c) ──
+# The TTS models (gemini-*-tts) speak the same voice NAME as the Live model of the
+# conversation but with another timbre and prosody (Irlan, real test of 2026-10-19: "it
+# sounds like someone else"). So the phrases are captured from the Live model itself, on
+# a short extra connection with the same voice and no tools; the TTS stays as the reserve.
+_LANG_NAMES = {"pt": "Brazilian Portuguese", "en": "English", "es": "Spanish", "fr": "French",
+               "de": "German", "it": "Italian", "tr": "Turkish"}
+_MATCH_MIN = 0.85       # a faithful take scores ~1.0; a swapped or mangled phrase ("A momento")
+                        # falls well under it. Only a guard against the model improvising.
+
+_live_tried: set[tuple[str, str]] = set()    # (voice, lang) already attempted in this run: the
+                                             # quota is not hammered at every reconnection
+
+
+def _norm(text: str) -> str:
+    """Lowercase, no accents, no punctuation, single spaces: how a transcript is compared."""
+    t = unicodedata.normalize("NFKD", text or "")
+    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+    t = re.sub(r"[^\w\s]|_", " ", t)
+    return " ".join(t.split())
+
+
+def _matches(expected: str, heard: str) -> bool:
+    """The Live transcript says the phrase that was asked for (>= 0.85 similarity)."""
+    a, b = _norm(expected), _norm(heard)
+    return bool(a and b) and difflib.SequenceMatcher(None, a, b).ratio() >= _MATCH_MIN
+
+
+def _live_config(voice: str, lang: str) -> dict:
+    """Mirror of the session config (main.py ``_build_config``) cut to what a speech engine
+    needs: the same voice, audio out, output transcription. No ``language_code`` (the main
+    session does not pin one either: the language comes from the line), no tools, none of
+    the JARVIS prompt."""
+    name = _LANG_NAMES.get(lang, "English")
+    return {
+        "response_modalities": ["AUDIO"],
+        "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": voice}}},
+        "output_audio_transcription": {},
+        "system_instruction": ("You are a speech engine. When the user sends a line, say exactly "
+                               f"that line, word for word, in {name}, and nothing else."),
+    }
+
+
+def _real_connect() -> Callable:
+    """``connect(model, config_dict)`` over the real SDK; imported here so the module (and
+    its tests) never load google.genai."""
+    from google import genai
+    from google.genai import types
+    from core import gemini
+    key = gemini.api_key()
+    if not key:
+        raise RuntimeError("no Gemini API key")
+    client = genai.Client(api_key=key, http_options={"api_version": "v1beta"})
+    return lambda model, config: client.aio.live.connect(
+        model=model, config=types.LiveConnectConfig(**config))
+
+
+def live_capture(texts: list[str], *, model: str, voice: str, lang: str,
+                 connect: Callable | None = None,
+                 timeout_s: float = 15.0) -> list[tuple[np.ndarray | None, str, str | None]]:
+    """Have the Live model say each line, over ONE connection.
+
+    Returns, per text, ``(pcm int16 @ 24 kHz or None, transcription, error or None)``.
+    Synchronous from outside (``asyncio.run`` in the calling thread: the prefetch daemon),
+    and it never raises. A connection failure marks every line ``"connect: <msg>"``; a line
+    that times out or fails ends the session (it is left mid-turn, so the next line would
+    get the tail of this one) and the lines after it get ``"skipped: ..."``. One
+    ``oneshot`` usage row per line, with the Live model and the reply's ``usage_metadata``.
+    ``connect(model, config_dict)`` is injectable for tests (default: the real SDK)."""
+    try:
+        return asyncio.run(_capture(texts, model, voice, lang, connect, timeout_s))
+    except Exception as e:
+        return [(None, "", f"connect: {str(e)[:160]}")] * len(texts)
+
+
+async def _capture(texts, model, voice, lang, connect, timeout_s):
+    from core import llm_usage
+    results: list[tuple[np.ndarray | None, str, str | None]] = []
+    try:
+        cm = (connect or _real_connect())(model, _live_config(voice, lang))
+        session = await cm.__aenter__()
+    except Exception as e:
+        return [(None, "", f"connect: {str(e)[:160]}")] * len(texts)
+
+    async def one(text: str):
+        chunks, heard, usage = [], [], None
+        await session.send_client_content(
+            turns={"role": "user", "parts": [{"text": text}]}, turn_complete=True)
+        async for r in session.receive():
+            if getattr(r, "data", None):
+                chunks.append(r.data)
+            sc = getattr(r, "server_content", None)
+            ot = getattr(sc, "output_transcription", None)
+            if getattr(ot, "text", None):
+                heard.append(ot.text)
+            if getattr(r, "usage_metadata", None):
+                usage = r.usage_metadata
+            if getattr(sc, "turn_complete", False):
+                break
+        return b"".join(chunks), "".join(heard).strip(), usage
+
+    broken = None
+    try:
+        for text in texts:
+            if broken:
+                results.append((None, "", f"skipped: {broken}"))
+                continue
+            t0, usage, outcome = time.monotonic(), None, "ok"
+            try:
+                raw, heard, usage = await asyncio.wait_for(one(text), timeout_s)
+                if len(raw) < 2:
+                    results.append((None, heard, "no audio"))
+                    outcome = "error"
+                else:
+                    results.append((np.frombuffer(raw[:len(raw) // 2 * 2], dtype=np.int16).copy(),
+                                    heard, None))
+            except asyncio.TimeoutError:
+                broken, outcome = f"timeout after {timeout_s:g}s", "timeout"
+                results.append((None, "", broken))
+            except Exception as e:
+                broken, outcome = f"live error: {str(e)[:120]}", llm_usage.result_of(e)
+                results.append((None, "", broken))
+            llm_usage.record_oneshot(model, None, outcome,
+                                     int((time.monotonic() - t0) * 1000), usage)
+    finally:
+        try:
+            await cm.__aexit__(None, None, None)
+        except Exception:
+            pass
+    return results
+
+
 def prefetch(voice: str, lang: str, on_error: Callable[[str, str], None] | None = None,
-             synth: Callable | None = None) -> threading.Thread | None:
+             synth: Callable | None = None, *, live_model: str | None = None,
+             connect: Callable | None = None) -> threading.Thread | None:
     """Generate the phrase variants that are not cached yet, off the calling thread.
 
-    Returns the daemon thread, or None when everything is already on disk (the
-    common case after the first run). The audio is trimmed and its length checked
-    before it is written (a bad take is not cached); a failure of one variant goes to
-    ``on_error(kind, message)``, leaves no file behind (``_write_wav`` is atomic) and
-    does not stop the other variants, so the next connection simply tries again.
-    ``synth`` is injectable for tests; the default is the picker's TTS ladder with the
-    bare text and the language code (no style line: see ``voice_preview._synthesise``).
+    Two stages in the daemon thread. (a) With ``live_model``, and only once per run for
+    each (voice, lang) (``_live_tried``), the variants without a ``live`` file are
+    captured from the Live model, the same one that speaks the conversation; each take
+    must pass ``_matches`` (the transcript says the asked phrase) and ``_trim_and_check``
+    before it is written. (b) Then the TTS ladder fills what has no file of any source.
+    A rejected or failed variant goes to ``on_error(kind, message)`` and leaves no file
+    (``_write_wav`` is atomic); a failed Live connection is reported once as
+    ``on_error("live", message)`` and stage (b) carries on.
+
+    Returns the thread, or None when nothing is missing. The cache is by voice, not by
+    model: changing ``LIVE_MODEL`` (or wanting new takes) means deleting
+    ``config/voice_cache/wait_v3_live_*``. ``synth``/``connect`` are injectable for tests;
+    the default ``synth`` is the picker's TTS with the bare text and the language code.
     """
-    # An existing but unreadable or empty file counts as missing: otherwise a bad
-    # cache would mean the tone forever, with nothing ever regenerating it.
-    missing = [(kind, i, text) for kind in TEXTS
-               for i, text in enumerate(_variants(kind, lang))
-               if load_phrase(kind, i, voice, lang) is None]
-    if not missing:
+    variants = [(kind, i, text) for kind in TEXTS
+                for i, text in enumerate(_variants(kind, lang))]
+    # An existing but unreadable or empty file counts as missing: otherwise a bad cache
+    # would mean the tone forever, with nothing ever regenerating it.
+    live_todo = []
+    if live_model and (voice, lang) not in _live_tried:
+        live_todo = [v for v in variants if load_phrase(v[0], v[1], voice, lang, "live") is None]
+        if live_todo:
+            _live_tried.add((voice, lang))
+    if not live_todo and all(load_phrase(k, i, voice, lang) is not None for k, i, _ in variants):
         return None
+
+    def report(kind: str, msg: str) -> None:
+        if on_error:
+            try:
+                on_error(kind, msg[:160])
+            except Exception:
+                pass
+
+    def save(kind: str, i: int, src: str, pcm: np.ndarray, rate: int) -> None:
+        from core import voice_preview
+        pcm = _trim_and_check(kind, pcm, rate)
+        voice_preview._write_wav(phrase_path(kind, i, voice, lang, src), _to_rate(pcm, rate), RATE)
+
+    def live_stage() -> None:
+        got = live_capture([t for _, _, t in live_todo], model=live_model, voice=voice,
+                           lang=lang, connect=connect)
+        if got and all((e or "").startswith("connect:") for _, _, e in got):
+            return report("live", got[0][2])
+        for (kind, i, text), (pcm, heard, err) in zip(live_todo, got):
+            try:
+                if err:
+                    raise RuntimeError(err)
+                if not _matches(text, heard):
+                    raise RuntimeError(f"live said {heard!r}, not the asked phrase")
+                save(kind, i, "live", pcm, RATE)
+            except Exception as e:
+                report(kind, str(e))
 
     def work() -> None:
         from core import voice_preview
+        if live_todo:
+            try:
+                live_stage()
+            except Exception as e:
+                report("live", str(e))
         fn = synth or voice_preview._synthesise
         code = BCP47.get(lang, "en-US")
-        for kind, i, text in missing:
+        for kind, i, text in variants:
+            if load_phrase(kind, i, voice, lang) is not None:
+                continue            # a live take (or an earlier tts one) already covers it
             try:
                 pcm, rate = fn(voice, lang, text=text, style=None, language_code=code)
                 if pcm is None or len(pcm) == 0:
                     raise RuntimeError("TTS returned no audio")
-                pcm = _trim_and_check(kind, pcm, rate)
-                voice_preview._write_wav(phrase_path(kind, i, voice, lang), _to_rate(pcm, rate), RATE)
+                save(kind, i, "tts", pcm, rate)
             except Exception as e:
-                if on_error:
-                    try:
-                        on_error(kind, str(e)[:160])
-                    except Exception:
-                        pass
+                report(kind, str(e))
 
     th = threading.Thread(target=work, daemon=True, name="wait-cue-prefetch")
     th.start()

@@ -45,6 +45,7 @@ Quem usa o resultado:
 
 - Observado pelo Irlan: a frase de espera saiu "misturada em inglês e italiano" (transcrita como "A momento."). Medido em seguida: com instrução de estilo o TTS lê a instrução em voz alta ou enche de silêncio (6–10 s); frase curta ("Um instante.") sai em inglês mesmo com o idioma fixado; frase completa sem instrução, com o idioma da fala `pt-BR`, sai em português do Brasil em 2,2 s. → A: as frases são geradas **só com o texto**, com o idioma BCP-47 do usuário (`pt-BR` para português), cada uma com **pelo menos 5 palavras**; áudio gerado fora da faixa de duração esperada é descartado como falha.
 - Q: A frase de espera pode variar para não ficar monótona? → A: Sim: várias frases por tipo (5 de espera e 3 de desistência em pt-BR; 3 e 2 nas outras línguas), sorteadas entre as que estão em cache, nunca a mesma duas vezes seguidas.
+- Observado pelo Irlan: as frases em pt-BR soaram com outra voz que a da conversa (o TTS é outro modelo, mesmo com o nome de voz igual). → A: as frases são geradas pelo **próprio modelo Live, na voz da sessão**, conferidas pela transcrição; o TTS fica como reserva e o tom como último recurso.
 
 ## User Scenarios & Testing *(mandatory)*
 

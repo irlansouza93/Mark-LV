@@ -104,6 +104,37 @@ Levantado em 2026-10-19 lendo `main.py`, `core/llm_usage.py`, `core/voice_previe
   resposta (latência registrada: 1 ms). Episódio fechado em < 150 ms vira
   `cancelled/late_transcript` e não entra nos percentis.
 
+## R4c — Frases na voz exata da conversa (gerar pelo modelo Live)
+
+- **Observado (Irlan, teste real 2026-10-19):** as frases em pt-BR do R4b soaram com outra voz que
+  a da conversa, embora o nome seja o mesmo (Laomedeia). Causa: a conversa é falada pelo modelo
+  Live de áudio nativo (`gemini-3.1-flash-live-preview`), as frases pelos modelos de TTS
+  (`gemini-3.8-flash-*-tts`) — mesmo nome de voz, timbre e prosódia de outro modelo.
+- **Decision:** gerar as frases com o **mesmo modelo Live e a mesma voz** da sessão, numa conexão
+  curta em segundo plano (thread daemon do `prefetch`, `asyncio.run` próprio), uma vez por
+  voz/idioma/modelo:
+  - config mínima espelhando a sessão principal: `response_modalities=["AUDIO"]`,
+    `speech_config` só com a voz (a sessão principal **não** fixa `language_code`),
+    `output_audio_transcription={}`, e `system_instruction` curta: "You are a speech engine.
+    When the user sends a line, say exactly that line, word for word, in <language name>, and
+    nothing else." — nenhuma ferramenta, nenhum prompt do JARVIS;
+  - para cada variante: `send_client_content(turn_complete=True)` com o texto; junta o PCM
+    (24 kHz) e a `output_transcription` até `turn_complete` (teto de 15 s por frase);
+  - **conferência:** transcrição normalizada (minúsculas, sem acento e pontuação) com
+    similaridade ≥ 0,85 (`difflib.SequenceMatcher`) ao texto pedido, mais a validação de duração
+    do R4b; reprovou → `on_error` e a variante cai para o TTS.
+- **Reserva:** falha de conexão/cota/tempo do Live → TTS do R4b para as variantes que faltarem;
+  sem nada → tom. A sessão principal nunca espera por isso.
+- **Cache:** `wait_v3_<src>_<kind>_<i>_<voice>_<lang>.wav`, `src` = `live` | `tts`;
+  `pcm_for` prefere `live`. A cada conexão, variantes sem arquivo `live` tentam o Live de novo
+  (no máximo uma tentativa por execução do app, para não martelar a cota); as `tts` continuam
+  valendo enquanto isso. O modelo Live entra no nome? Não: o arquivo é por voz; trocar o
+  `LIVE_MODEL` exige apagar o cache (anotar no docstring).
+- **Custo:** registrado em `llm_usage` (uma linha `oneshot` por frase, modelo Live, com o
+  `usage_metadata` da resposta). Texto fixo, sem dado pessoal (Princípio VIII).
+- **Risco:** limite de sessões Live simultâneas no nível grátis; se a conexão extra for recusada,
+  vale a reserva e a próxima execução tenta de novo.
+
 ## R5 — Registro da latência
 
 - **Decision:** um registro novo `kind: "voice_wait"` por episódio, no mesmo `usage-AAAA-MM.jsonl`

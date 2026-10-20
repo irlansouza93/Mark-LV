@@ -2505,7 +2505,8 @@ class JarvisLive:
                     _wait_cue.prefetch(
                         _cv, _cl,
                         on_error=lambda kind, msg, _cv=_cv, _cl=_cl:
-                            self._wait_phrase_failed(_cv, _cl, kind, msg))
+                            self._wait_phrase_failed(_cv, _cl, kind, msg),
+                        live_model=live_model)
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"

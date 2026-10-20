@@ -200,6 +200,16 @@ longa) e **código** (demanda 3).
 passos, tempo e custo, eventos de progresso) e dois agentes reais. Progresso visível em cartões
 (demanda 12).
 
+**Observado no teste real da spec 002 (2026-10-19).** Pesquisas pedidas na conversa levaram até
+**23 s** até a primeira palavra (mediana dos pedidos com ferramenta ≈ 10–15 s, 19 pedidos
+medidos em `voice_wait`), e a resposta saiu rasa. Caso de uso pedido pelo Irlan para a spec do
+agente de pesquisa: *"quais os melhores bancos para investir neste mês?"* → a voz responde
+superficialmente; o usuário pede *"compare com mais profundidade e precisão"* → a sessão de voz
+delega a um **agente de pesquisa em segundo plano** (buscas múltiplas, mais demorado), segue
+conversando, e o agente devolve o resultado à orquestradora ao terminar, que avisa e resume.
+Pontos a decidir na spec: teto de tempo/custo, onde o resultado aparece (voz + cartão/arquivo),
+cancelamento, e o cuidado do Princípio VIII (assunto financeiro = sensível, D12).
+
 ## 12. Canvas do holograma com dados reais (estilo JARVIS / óculos Meta)
 
 **Hoje.** O centro do HUD alterna cabeça, câmera e vídeo; os painéis são de configuração. Nenhum
