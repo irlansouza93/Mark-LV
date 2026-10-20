@@ -63,6 +63,7 @@ Levantado em 2026-10-19 lendo `main.py`, `core/llm_usage.py`, `core/voice_previe
   HUD em "pensando" se o episódio continua aberto.
 - **Alternatives considered:** segundo `OutputStream` — sobreposição possível, duplica a escolha
   de dispositivo e o eco; `sounddevice.play` — idem, e bloqueia/compete com o stream atual.
+- **Saída de áudio indisponível:** a frase usa a mesma saída da voz; se a saída falhar, a voz do modelo também falha e o aviso continua sendo o HUD (o erro da saída já é tratado e registrado pelo playback existente).
 
 ## R4 — Gerar e guardar as frases
 

@@ -155,8 +155,9 @@ uso; ele deve listar a latência de cada tipo e quantas vezes o HUD e as frases 
   tocar não chama o modelo. Se a frase ainda não existir no cache (primeira vez, sem rede, voz
   recém-trocada), toca um tom curto sintetizado no app.
 - **FR-004**: A espera MUST ser cancelada, sem tocar nada, assim que acontecer qualquer um destes:
-  chega áudio do modelo; o modelo conclui o turno; o usuário volta a falar ou interrompe; o
-  microfone é silenciado; o JARVIS volta a dormir; a sessão cai.
+  chega áudio do modelo; o modelo conclui o turno; o usuário interrompe; o
+  microfone é silenciado; o JARVIS volta a dormir; a sessão cai. Se o usuário volta a falar
+  antes de qualquer resposta, a contagem recomeça do fim da nova fala (não é cancelamento).
 - **FR-005**: As frases da rede de segurança (espera e desistência) NUNCA podem tocar por cima da
   voz do JARVIS; se a voz do modelo começar durante uma delas, a frase MUST ser cortada.
 - **FR-006**: A rede de segurança MUST NOT acrescentar nada ao que é enviado ao modelo (nenhum
@@ -195,7 +196,7 @@ uso; ele deve listar a latência de cada tipo e quantas vezes o HUD e as frases 
 
 - **SC-001**: No roteiro de teste real, em 100% dos turnos em que o usuário terminou de falar e o
   modelo ia responder, o usuário percebe algum sinal (voz, HUD "pensando" ou frase de espera) até o limite do
-  HUD mais 0,2 s.
+  HUD mais 0,2 s, contados do momento em que o app registra o fim da fala.
 - **SC-002**: Em turnos cuja resposta começa antes do limite do HUD, o HUD não entra em
   "pensando" (0 ocorrências no roteiro).
 - **SC-003**: Nenhuma frase da rede se sobrepõe de forma audível à voz do JARVIS (0 ocorrências no roteiro)
@@ -214,8 +215,8 @@ uso; ele deve listar a latência de cada tipo e quantas vezes o HUD e as frases 
 - **Valores padrão** (FR-010; ainda sem medição): HUD 1,5 s (sugestão de `docs/demandas.md` §13),
   frase 4 s, desistência 20 s. Recalibração prevista depois de ~1 semana de uso, pela sugestão do
   resumo de uso.
-- "Fim do turno do usuário" é medido no próprio app (pelo último trecho de fala reconhecido e/ou
-  pelo nível do microfone); o modelo de voz só responde depois que o servidor decide que a fala
+- "Fim do turno do usuário" é medido no próprio app (pelo último trecho de fala reconhecido pelo
+  servidor; ver research R1); o modelo de voz só responde depois que o servidor decide que a fala
   acabou, então parte da latência medida é essa decisão do servidor — é o que o usuário sente.
 - O registro de latência usa os arquivos de uso que a spec 001 já criou (mesma retenção de 12
   meses); nenhum arquivo novo em `logs/`.

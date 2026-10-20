@@ -228,6 +228,8 @@ demora é para *escrever* os argumentos da ferramenta. Não há rede de seguran�
 modelo chegou em ~1,5 s (valor a medir), o HUD entra em estado "pensando" (rosto/cor) e, passado
 outro limite, toca um som curto local. Medir antes quanto tempo leva hoje cada tipo de pedido.
 
+**Estado (2026-10-19).** A spec 002 (`specs/002-wait-safety-net/`) implementa a rede de segurança: HUD "pensando" em 1,5 s, frase "Um momento." na voz do JARVIS em 4 s e frase de desistência em 20 s; os limites ficam em `config/api_keys.json` → `wait_cue`. A latência de cada pedido passa a ser medida (`voice_wait` no registro de uso), e o `tools/usage_report.py` sugere novos limites depois de ~30 pedidos.
+
 ## 14. Log de erros com autorrelato, entrando no plano de correção
 
 **Hoje.** Erros vão para `print`/`traceback.print_exc()` no console e para o log da tela; somem ao
