@@ -384,6 +384,52 @@ def get_turn_tuning() -> dict:
     }
 
 
+def get_wait_cue() -> dict:
+    """When the assistant owes you a sign of life while you wait for a spoken answer.
+
+    ON by default: a reply that takes seconds with no sound and a frozen HUD
+    looks exactly like a dead app. Every limit counts from the end of what you
+    said (or from sending a typed request) until the first audio of the reply:
+
+    - `thinking_ms`: after this, the HUD shows "thinking" (no sound).
+    - `phrase_ms`: after this, a short "one moment" is spoken.
+    - `give_up_ms`: with no tool running, after this the assistant says it could
+      not answer and asks you to repeat, instead of staying silent forever.
+
+    The defaults (1.5 s / 4 s / 20 s) are a first guess. Recalibrate them from the
+    "Espera da voz" section of `tools/usage_report.py`, which measures the real
+    wait and suggests limits once there is enough data. A change takes effect on
+    the next session connection, like `turn_tuning`. `"enabled": false` turns the
+    cues off; the wait is still measured.
+
+    The ordering is enforced after clamping (thinking < phrase < give-up),
+    otherwise a hand-edited file could make the phrase fire before the HUD
+    changed or the give-up cut off a phrase that never got to play.
+    """
+    cfg = load_api_keys().get("wait_cue")
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    def _int(key, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(cfg.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    thinking = _int("thinking_ms", 1500, 300, 10000)
+    phrase = _int("phrase_ms", 4000, 1000, 30000)
+    give_up = _int("give_up_ms", 20000, 5000, 120000)
+    if phrase <= thinking:
+        phrase = thinking + 500
+    if give_up <= phrase:
+        give_up = phrase + 1000
+    return {
+        "enabled":     bool(cfg.get("enabled", True)),
+        "thinking_ms": thinking,
+        "phrase_ms":   phrase,
+        "give_up_ms":  give_up,
+    }
+
+
 def save_turn_tuning(values: dict) -> None:
     ensure_config_dir()
     data: dict = {}

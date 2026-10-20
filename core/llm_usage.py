@@ -453,6 +453,23 @@ def _fin_live_msg(rec: dict, ts: float):
     return _priced(out, tokens, "gemini", st.model, ts)
 
 
+def _fin_voice_wait(rec: dict, ts: float) -> dict:
+    """Writer thread: stamp the model of the open Live session (same lookup as a live turn)."""
+    rec["model"] = (_live or _orphan).model
+    return rec
+
+
+def record_voice_wait(rec: dict) -> None:
+    """One wait episode (user request -> first sound of the answer), as built by
+    ``core.wait_cue.WaitWatchdog``. Never raises, never blocks: one dict on the errlog queue.
+    No tokens or cost here: ``summarize()`` ignores it and ``wait_summary()`` reads it."""
+    try:
+        errlog._enqueue("usage", {"kind": "voice_wait", "provider": "gemini", **rec,
+                                  "_finalize": _fin_voice_wait})
+    except Exception:
+        pass
+
+
 def live_message(response) -> None:
     """Called for EVERY message of the Live receive loop, on the audio thread. Reads a few
     attributes, appends transcription text to the draft of the turn (errlog.note_speech) and,
@@ -527,6 +544,8 @@ def summarize(records, tz) -> dict:
             skipped += 1
             continue
         kind = r.get("kind")
+        if kind == "voice_wait":         # latency episodes: read by wait_summary(), not a call, not a skip
+            continue
         dt = parse_ts(r.get("ts"), tz)
         if dt is None or kind not in (*_CALL_KINDS, "live_session"):
             skipped += 1
