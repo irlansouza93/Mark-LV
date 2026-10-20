@@ -1052,7 +1052,7 @@ class JarvisLive:
                     model_quiet_s=now - self._last_model_audio,
                     user_quiet_s=now - self._last_user_speech,
                     reply_owed=bool(_w is not None and _w.waiting),
-                    tools_running=len(self._tool_tasks)):
+                    tools_running=_w.tools_active if _w is not None else 0):
                 break
             await asyncio.sleep(0.1)
         if left <= _live.GO_AWAY_MARGIN_S:
@@ -1101,9 +1101,11 @@ class JarvisLive:
                 fr = types.FunctionResponse(id=fc.id, name=fc.name,
                                             response={"result": f"Tool '{fc.name}' failed: {e}"})
             fn_responses.append(fr)
-            if fc.name == "screen_process":
+            if (fc.name == "screen_process"
+                    and str((fr.response or {}).get("result", "")).startswith("[VISION_ACTIVE]")):
                 # Its result says "the image is arriving with this result":
                 # replayed without the image it would make the model invent one.
+                # (A cooldown or camera-error result is replayed as it is.)
                 vision = self._pending_vision
                 entries.append(_live.result_entry(fc.name, dict(fc.args or {}),
                                                   {"result": _live.VISION_LOST_RESULT}))

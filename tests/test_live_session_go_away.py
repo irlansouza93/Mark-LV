@@ -185,3 +185,19 @@ def test_prompt_cuts_long_results():
     txt = ls.orphan_prompt([ls.result_entry("web_search", {}, {"result": "x" * 50_000})])
     assert len(txt) < ls.ORPHAN_RESULT_LIMIT + 1_000
     assert "[truncated]" in txt
+
+
+# ── the episode's own tools (review 2026-10-19, point A) ─────────────────────
+
+def test_only_the_open_episodes_tools_lift_the_hold():
+    # A NON_BLOCKING tool from an earlier request still running must not let a
+    # new question (no tool of its own) be dropped by the renewal.
+    from core.wait_cue import Limits, WaitWatchdog
+    wd = WaitWatchdog(Limits(enabled=False), clock=lambda: 100.0)
+    wd.tool_started()                   # idle: belongs to no episode
+    wd.user_speech()                    # new question
+    assert wd.waiting and wd.tools_active == 0
+    wd.tool_started()                   # the question's own tool
+    assert wd.tools_active == 1
+    wd.tool_finished()
+    assert wd.tools_active == 0
