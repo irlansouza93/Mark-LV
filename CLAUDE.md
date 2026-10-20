@@ -45,6 +45,7 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
 | `core/errlog.py` | Registro em `logs/`: uma thread de escrita recebe dicts por fila (quem chama gasta ~1 µs). `jarvis.log` (console, via tee de stdout/stderr), `failures.jsonl` (assinatura, agrupamento, falha "mole", limite de rajada), `reports.jsonl` (relatos), `usage-*.jsonl`. `setup()`/`bind()` ligados no `main.py`; ganchos `record_failure`/`note_tool` nos loaders, em `core/gemini.py` e no `main.py` |
 | `core/redact.py` | Filtro de segredos aplicado a **todo** registro antes de ir ao disco (chaves de `api_keys.json`, formatos conhecidos, campos por nome) |
 | `core/llm_usage.py` | Uso de LLM e custo: tokens por modalidade, preço por tabela, medidor dos turnos de voz, resumo (`summarize`). `live_message(response)` roda em toda mensagem do Live — só lê atributos e enfileira |
+| `core/wait_cue.py` | Rede de segurança do silêncio (spec 002): `WaitWatchdog` puro (relógio injetável) decide HUD "pensando", frase de espera e desistência a partir do fim da fala; frases na voz do JARVIS em cache (`config/voice_cache/wait_*`), tom de reserva. Ganchos no `main.py` (`_wait_cue_loop`, `_wait_call`) |
 | `config/llm_prices.json` | Tabela de preços (US$/1M tokens, datada, com fonte); editar não exige código |
 | `actions/*.py` | Habilidades embutidas: cada arquivo expõe um dict `TOOL` com `handler` e é auto-descoberto por `core/action_loader.py`. `report_problem.py` grava o relato "não funcionou"; o relato **automático** (fala com "não funcionou"/"não deu certo"/"deu errado") é feito pelo `errlog.end_turn()` |
 | `plugins/*.py` | Plugins drop-in: dict `PLUGIN` + `run()` (ver `plugins/_template.py`), descobertos por `core/plugin_loader.py`, liga/desliga em 🧩 PLUGINS sem reiniciar |
@@ -73,6 +74,7 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
 - O console do Windows pode não ser UTF-8: ao rodar scripts que imprimem emoji, use `PYTHONIOENCODING=utf-8`.
 - **O console agora também vai para `logs/jarvis.log`** (o `errlog` troca `sys.stdout`/`sys.stderr` por um tee): `print` novo já fica registrado, filtrado de segredos. Para erro de verdade, use `errlog.record_failure`.
 - Tudo o que o JARVIS registra — inclusive a **transcrição das falas nos relatos** — fica em `logs/`, legível e apagável à mão (Princípio VIII). No Windows só dá para apagar com o app fechado (o app mantém os arquivos abertos).
+- **`main.py` (e outros arquivos do upstream) são guardados com CRLF no git.** Algumas ferramentas de edição convertem o arquivo inteiro para LF e o diff vira uma reescrita do arquivo todo. Depois de editar, confira `git diff --stat` (só as linhas novas) e, se preciso, restaure o CRLF.
 - `shutdown_jarvis` termina com `os._exit(0)`: **pula `finally` e `atexit`**. Nada que precise ser gravado ao sair pode depender deles (foi por isso que sessões de voz ficaram sem registro de fim; o resumo estima a duração).
 - Um worktree não tem `config/api_keys.json` (fica fora do git): copie o do repositório principal para rodar o app nele.
 

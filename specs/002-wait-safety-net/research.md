@@ -1,0 +1,200 @@
+# Research — 002 Aviso de espera garantido
+
+Levantado em 2026-10-19 lendo `main.py`, `core/llm_usage.py`, `core/voice_preview.py`,
+`memory/config_manager.py`, `tools/usage_report.py` e os registros da spec 001
+(`logs/` do worktree `competent-gauss-4570d1`, 2026-10-17 e 18).
+
+## R0 — O que a spec 001 mede (e o que não mede)
+
+- **Achado:** os 35 registros `live_turn` têm `latency_ms: null` (`_fin_live_msg` grava `None`
+  fixo). O `jarvis.log` tem horário em ms, mas só marca ferramentas (`📞`/`🔧`/`📤`) e conexão; a
+  fala do usuário só aparece no fim do turno (`You: …`), depois da resposta. **Não há como
+  calcular a latência fim-da-fala → primeiro áudio com os dados atuais.**
+- **Decision:** a medição faz parte desta feature (FR-007); os limites começam pelos padrões
+  da clarificação (1,5 s / 4 s / 20 s) e são recalibrados pela sugestão do resumo.
+
+## R1 — Como saber, no app, que o turno do usuário terminou
+
+- **Fatos:** a sessão usa detecção de fala **no servidor** (VAD automático; `turn_tuning`
+  desligado por padrão, `silence_ms` 550 quando ligado). O cliente não recebe um evento "fim da
+  fala". O que chega: trechos de `server_content.input_transcription` enquanto o usuário fala
+  (o laço já grava `self._last_user_speech` em cada um, `main.py:1719`), depois áudio
+  (`response.data`), `tool_call` e `turn_complete`.
+- **Decision:** o **último trecho de `input_transcription`** é a âncora do fim da fala. Cada
+  trecho novo empurra a âncora; os limites contam a partir dela. Pedido digitado
+  (`_on_text_command`) abre o episódio no momento do envio.
+- **Rationale:** é o sinal de que o servidor de fato ouviu fala (ruído que o servidor não
+  transcreve não abre episódio); não exige VAD local nem novo processamento no callback do
+  microfone. Atraso da transcrição só torna o aviso mais conservador (dispara depois, nunca antes).
+- **Alternatives considered:** nível do microfone (VAD local) — mais preciso para o instante,
+  mas dispara com ruído/eco e mexe no callback de áudio; VAD manual (`activityStart/End`) — muda
+  o protocolo da sessão, fora do escopo e arriscado para o merge com o upstream.
+- **Regra de exchange:** depois que o primeiro áudio do modelo chegou, trechos atrasados de
+  transcrição **não** abrem novo episódio até o `turn_complete` (a transcrição final às vezes
+  chega depois do início da resposta).
+
+## R2 — Proactive audio: o modelo pode escolher ficar calado
+
+- **Fato:** `proactive_audio` vem **ligado** (`get_proactive_audio_enabled`), e é o que impede o
+  JARVIS de responder à sala. Quando o modelo decide que a fala não era para ele, esperamos que o
+  servidor feche o turno (`turn_complete` sem áudio); isso **não foi medido** ainda.
+- **Decision:** o episódio fecha com `outcome = no_reply` no `turn_complete` sem áudio, sem frase.
+  O roteiro real inclui um caso de fala não dirigida ao JARVIS e confere no `voice_wait` se veio
+  `no_reply` (ok) ou `gave_up` (o servidor não fechou o turno).
+- **Contingência (só se o roteiro mostrar `gave_up` nesses casos):** antes do merge, exigir para
+  a frase de espera e a desistência que o episódio tenha um sinal de que o modelo vai responder
+  (ex.: `tool_call` ou `generation` iniciada) ou subir a desistência; decidir com os números do
+  roteiro e registrar aqui. Não implementar antes de medir.
+
+## R3 — Onde tocar as frases
+
+- **Decision:** colocar o PCM da frase (24 kHz, int16, em fatias de 2400 bytes) na **mesma
+  `audio_in_queue`** do playback da voz, marcando `self._cue_playing = True`.
+- **Rationale:** (a) uma única saída de áudio → impossível tocar por cima do modelo; (b) o
+  playback já liga `set_speaking(True)`, que **não envia o microfone** ao modelo e abre a cauda
+  de eco depois — o modelo nunca "ouve" o "Um momento" e responde a ele; (c) o avatar articula a
+  frase pelos visemas do próprio PCM; (d) zero código novo de dispositivo/plataforma.
+- ~~Cortar a frase~~ (versão até T029): esvaziar a fila no primeiro `response.data`. **Revisto no
+  teste real de 2026-10-19:** até ~0,4 s da frase já estava no buffer do dispositivo (lote de
+  200 ms + latência de saída de 213 ms medida), a frase saía cortada no meio da palavra e a
+  resposta entrava colada — o Irlan ouviu como "atropelo".
+- **Decision (T030): terminar e pausar.** Com `_cue_playing`, o 1º `response.data` do modelo
+  **não** esvazia a fila: enfileira primeiro ~0,2 s de silêncio (4800 bytes a 24 kHz int16) e
+  depois o áudio do modelo, que sai na ordem da fila — a frase termina inteira, pausa, resposta.
+  As frases de espera passam a ter ≈ 1–1,5 s (validação: ≤ 2,2 s após aparar), então o atraso
+  máximo que isso impõe à resposta é ~2,4 s, num pedido que já esperou ≥ 4 s. A captura pelo
+  Live pede ritmo natural e ágil no `system_instruction`.
+- **Fim da frase sem resposta:** hoje o playback só chama `set_speaking(False)` com
+  `_turn_done_event` setado; com a frase, o microfone ficaria preso. O ramo de timeout do
+  playback passa a liberar também quando `_cue_playing` e a fila esvaziou, e o vigia recoloca o
+  HUD em "pensando" se o episódio continua aberto.
+- **Alternatives considered:** segundo `OutputStream` — sobreposição possível, duplica a escolha
+  de dispositivo e o eco; `sounddevice.play` — idem, e bloqueia/compete com o stream atual.
+- **Saída de áudio indisponível:** a frase usa a mesma saída da voz; se a saída falhar, a voz do modelo também falha e o aviso continua sendo o HUD (o erro da saída já é tratado e registrado pelo playback existente).
+
+## R4 — Gerar e guardar as frases
+
+- **Decision:** `voice_preview._synthesise(voice, lang, text=None, style=None)` ganha parâmetros
+  opcionais (padrão = comportamento atual). `core/wait_cue.py` guarda
+  `config/voice_cache/wait_<kind>_<voice>_<lang>.wav` (`kind` = `hold` | `giveup`), com textos
+  por idioma nas mesmas 7 línguas do seletor. `prefetch(voice, lang)` roda numa thread daemon na
+  conexão da sessão e na troca de voz; se o arquivo existe, não faz nada. A chamada TTS já é
+  registrada em `llm_usage.record_tts` (custo visível no resumo).
+- **Reserva:** sem arquivo (primeiro uso, sem rede, cota), toca um **tom** sintetizado (dois
+  bipes senoidais suaves ~120 ms, 880→660 Hz, com fade) e a falha do TTS vira `record_failure`
+  + uma linha "SYS: wait phrase unavailable … using a tone" (uma vez por voz/idioma por sessão).
+- **Reamostragem:** se o TTS devolver taxa ≠ 24 kHz, interpolação linear com numpy.
+
+## R4b — Pronúncia e variação (teste real de 2026-10-19)
+
+- **Medido** (TTS `gemini-3.8-flash-lite-tts`, voz Laomedeia, transcrição pelo `gemini-2.5-flash`):
+
+  | Pedido ao TTS | Duração | O que saiu |
+  |---|---|---|
+  | `"Say this calmly and briefly, like a butler: Um momento."` (versão 1) | 5,3 s | "A momento." — sotaque inglês/italiano (relato do Irlan) |
+  | instrução em português + texto | 6,2–7,1 s | **lê a instrução** em voz alta |
+  | instrução em inglês separada + texto + `language_code="pt-BR"` | 10,5 s | certo, mas cheio de silêncio |
+  | `"Um instante."` + `pt-BR` | 1,1 s | "Ohm's inch" (inglês) — frase curta demais para o idioma |
+  | `"Só um momento, já vejo isso."` + `pt-BR`, sem instrução | **2,2 s** | português do Brasil ✔ |
+
+- **Decision:** `_synthesise(..., text=..., style=None, language_code=...)` — sem prefixo de estilo
+  quando `style is None and text` foi dado (o seletor de voz continua igual); `SpeechConfig`
+  recebe `language_code` (BCP-47: pt→`pt-BR`, en→`en-US`, es→`es-US`, fr→`fr-FR`, de→`de-DE`,
+  it→`it-IT`, tr→`tr-TR`). Cada variante tem ≥ 5 palavras. Áudio gerado é **validado**: fala
+  aparada nas pontas (silêncio < 2% do pico) e duração entre 0,6 s e 4,5 s (espera) / 6 s
+  (desistência); fora disso → `on_error` e nada gravado.
+- **Variação:** `TEXTS[kind][lang]` vira lista; cache
+  `wait_v2_<kind>_<i>_<voice>_<lang>.wav` (o `v2` invalida as frases da versão 1, que ficam
+  órfãs e podem ser apagadas); `pcm_for` sorteia entre as variantes em cache, evitando repetir a
+  última de cada tipo.
+- **Latência falsa:** em 1 dos 8 pedidos do teste a transcrição chegou junto com o áudio da
+  resposta (latência registrada: 1 ms). Episódio fechado em < 150 ms vira
+  `cancelled/late_transcript` e não entra nos percentis.
+
+## R4c — Frases na voz exata da conversa (gerar pelo modelo Live)
+
+- **Observado (Irlan, teste real 2026-10-19):** as frases em pt-BR do R4b soaram com outra voz que
+  a da conversa, embora o nome seja o mesmo (Laomedeia). Causa: a conversa é falada pelo modelo
+  Live de áudio nativo (`gemini-3.1-flash-live-preview`), as frases pelos modelos de TTS
+  (`gemini-3.8-flash-*-tts`) — mesmo nome de voz, timbre e prosódia de outro modelo.
+- **Decision:** gerar as frases com o **mesmo modelo Live e a mesma voz** da sessão, numa conexão
+  curta em segundo plano (thread daemon do `prefetch`, `asyncio.run` próprio), uma vez por
+  voz/idioma/modelo:
+  - config mínima espelhando a sessão principal: `response_modalities=["AUDIO"]`,
+    `speech_config` só com a voz (a sessão principal **não** fixa `language_code`),
+    `output_audio_transcription={}`, e `system_instruction` curta: "You are a speech engine.
+    When the user sends a line, say exactly that line, word for word, in <language name>, and
+    nothing else." — nenhuma ferramenta, nenhum prompt do JARVIS;
+  - para cada variante: `send_client_content(turn_complete=True)` com o texto; junta o PCM
+    (24 kHz) e a `output_transcription` até `turn_complete` (teto de 15 s por frase);
+  - **conferência:** transcrição normalizada (minúsculas, sem acento e pontuação) com
+    similaridade ≥ 0,85 (`difflib.SequenceMatcher`) ao texto pedido, mais a validação de duração
+    do R4b; reprovou → `on_error` e a variante cai para o TTS.
+- **Reserva:** falha de conexão/cota/tempo do Live → TTS do R4b para as variantes que faltarem;
+  sem nada → tom. A sessão principal nunca espera por isso.
+- **Cache:** `wait_v3_<src>_<kind>_<i>_<voice>_<lang>.wav`, `src` = `live` | `tts`;
+  `pcm_for` prefere `live`. A cada conexão, variantes sem arquivo `live` tentam o Live de novo
+  (no máximo uma tentativa por execução do app, para não martelar a cota); as `tts` continuam
+  valendo enquanto isso. O modelo Live entra no nome? Não: o arquivo é por voz; trocar o
+  `LIVE_MODEL` exige apagar o cache (anotar no docstring).
+- **Custo:** registrado em `llm_usage` (uma linha `oneshot` por frase, modelo Live, com o
+  `usage_metadata` da resposta). Texto fixo, sem dado pessoal (Princípio VIII).
+- **Risco:** limite de sessões Live simultâneas no nível grátis; se a conexão extra for recusada,
+  vale a reserva e a próxima execução tenta de novo.
+
+## R3b — Eco da frase chegando ao modelo (teste A/B de 2026-10-19)
+
+- **Observado:** com as frases capturadas do Live (voz idêntica), o 1º turno depois de duas
+  pesquisas durou só 5,4 s e 4,5 s (contra 10–48 s em ~25 pesquisas anteriores) e o Irlan ouviu o
+  JARVIS "repetir que ia procurar" em vez de dar o resultado. **A/B:** com a frase desligada
+  (`phrase_ms` 30 s), a mesma pesquisa deu o resultado normalmente → a frase é a causa.
+- **Mecanismo provável:** o playback libera o microfone ~0,1 s depois de a fila esvaziar, com a
+  cauda de eco de 463 ms; mas o dispositivo ainda tem frase no buffer (lote de 200 ms + latência
+  de saída). O fim da frase entra no microfone, vai ao servidor como **fala do usuário**
+  ("…isso aqui") no meio da ferramenta, e o modelo responde a essa "fala" em vez de entregar o
+  resultado. Um registro `late_transcript` às 22:48:35 é compatível com isso.
+- **Decision (T031):** **bloqueio firme do microfone** pela duração da frase + latência de saída
+  medida + 0,6 s de margem, contado do momento em que a frase é enfileirada; nesse intervalo
+  nenhum bloco do microfone vai ao modelo (nem passa pelo filtro de eco). Função pura
+  `cue_mute_s(duration_s, out_latency_s)` em `core/wait_cue.py`. Diagnóstico sem texto:
+  `echo_suspect: bool` no `voice_wait` quando chega `input_transcription` parecida com o texto
+  da frase tocada (mesma normalização do R4c, similaridade ≥ 0,6) até 3 s depois do fim do
+  bloqueio.
+
+## R5 — Registro da latência
+
+- **Decision:** um registro novo `kind: "voice_wait"` por episódio, no mesmo `usage-AAAA-MM.jsonl`
+  (fila do `errlog`, `_finalize` preenche o modelo da sessão aberta), em vez de preencher o
+  `latency_ms` do `live_turn`.
+- **Rationale:** um pedido com ferramenta passa por vários `turn_complete` (vários `live_turn`);
+  o episódio de espera é um por pedido do usuário. Registro separado evita amarrar os dois
+  ciclos. `summarize()` passa a ignorar `voice_wait` sem contá-lo em `skipped`.
+- **Latência:** `latency_ms` = âncora → primeiro `response.data` recebido. O atraso do
+  dispositivo (medido 213 ms nesta máquina, `🔊 Output latency`) é constante e documentado, não
+  somado.
+
+## R6 — Sugestão de limites no resumo
+
+- **Decision (puro, `wait_summary`):** só sugere com ≥ 30 episódios com latência; senão "dados
+  insuficientes (N de 30)".
+  - HUD = p90 da latência dos turnos **sem** ferramenta, arredondado a 100 ms, faixa 800–3000 ms
+    (uma resposta típica rápida não pisca "pensando").
+  - Frase = máx(HUD + 1500, p90 de todos), faixa 2500–8000 ms.
+  - Desistência = máx(20000, p99 de todos + 5000), faixa até 60000 ms.
+- **Rationale:** regras simples, explicáveis no relatório; a decisão final é manual (clarificação Q2).
+
+## R7 — Desistência
+
+- **Decision:** contada a partir de máx(âncora, fim da última ferramenta) e só sem ferramenta
+  rodando. Ao vencer: frase `giveup`, `errlog.record_failure("voice", "wait_give_up",
+  error_type="soft:no reply", context={latency limits, tool})`, `ui.write_log("SYS: No reply
+  from the model — please repeat.")`, HUD volta a `LISTENING` (se não mudo). Episódio fecha com
+  `outcome = gave_up`; áudio que chegar depois toca normalmente.
+
+## R8 — Tique do vigia
+
+- **Decision:** tarefa asyncio própria (`_wait_cue_loop`) com `asyncio.sleep(0.1)` criada junto
+  dos outros laços da sessão; cada tique chama `watchdog.tick()` e executa as ações. 100 ms de
+  resolução cabe nos critérios (SC-001: limite + 0,2 s).
+- **Alternatives considered:** reaproveitar o timeout de 100 ms do playback — não tiquetaqueia
+  enquanto há áudio na fila e mistura responsabilidades.

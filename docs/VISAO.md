@@ -76,3 +76,4 @@ Kit numera na criação). Parecer e dependências de cada item em [`demandas.md`
 - **Dieta do prompt do Live (candidata a spec):** os ~17 mil tokens fixos reenviados a cada turno de voz (medidos na spec 001) são o maior custo da voz e o que mais consome a cota grátis. Enxugar `core/prompt.txt`, o núcleo da memória e as declarações de ferramentas antes do modo privado (D12, spec 004).
 - **D11:** bases e campos de cada área no Notion (tarefas, rotinas, cursos, finanças) — levantar no `/speckit-clarify` da spec 007.
 - Criar as tags `v55.0.0` (base do upstream) e `v55.1.0` (trabalho do fork até `a56cb2a`) e enviá-las ao `origin` — aguardando confirmação.
+- **Spec 002:** recalibrar os limites do aviso de espera (`wait_cue`: 1,5 / 4 / 20 s) com a sugestão da seção "Espera da voz" do `tools/usage_report.py` depois de ~1 semana de uso (≥ 30 pedidos medidos). Conferir no teste real se a fala não dirigida ao JARVIS fecha como `no_reply` (research R2 da spec 002).

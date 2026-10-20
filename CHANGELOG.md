@@ -34,6 +34,7 @@ PATCH a cada correção. Tags: `v55.x.y`.
     voz do Gemini transcreve mal parte das frases (1 de 3 relatos com "eu queria X", e com X errado);
     SC-004 conferido com uma sessão real de 3,5 min e 1 chamada avulsa (não 10 min); SC-008 (plugin em
     loop por 10 min) não foi executado, só coberto por testes do limite de rajada.
+- Wait safety net (spec 002): when the model stays silent after the user speaks, the HUD shows the thinking state (1.5 s), JARVIS says a short cached "one moment" phrase (4 s, once per request, rotating among 5 pt-BR variants) captured once from the Live model itself in the session's voice and checked against its transcript (TTS with the BCP-47 speech language as fallback, a short tone as last resort); the phrase always finishes before the answer, with a 0.2 s pause, and the mic is gated while it plays so it never reaches the model as user speech; and, after 20 s with no reply and no tool running, a give-up phrase plus a soft failure in logs/. Every request records its latency (`voice_wait`) in the usage log; `tools/usage_report.py` shows p50/p90/p95 with and without tools and suggests new limits. Limits live in `config/api_keys.json` → `wait_cue`.
 
 ### Changed
 - Exceção que escapa de um slot do Qt (ou de qualquer thread) não fecha mais o JARVIS: o

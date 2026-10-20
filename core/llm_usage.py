@@ -453,6 +453,23 @@ def _fin_live_msg(rec: dict, ts: float):
     return _priced(out, tokens, "gemini", st.model, ts)
 
 
+def _fin_voice_wait(rec: dict, ts: float) -> dict:
+    """Writer thread: stamp the model of the open Live session (same lookup as a live turn)."""
+    rec["model"] = (_live or _orphan).model
+    return rec
+
+
+def record_voice_wait(rec: dict) -> None:
+    """One wait episode (user request -> first sound of the answer), as built by
+    ``core.wait_cue.WaitWatchdog``. Never raises, never blocks: one dict on the errlog queue.
+    No tokens or cost here: ``summarize()`` ignores it and ``wait_summary()`` reads it."""
+    try:
+        errlog._enqueue("usage", {"kind": "voice_wait", "provider": "gemini", **rec,
+                                  "_finalize": _fin_voice_wait})
+    except Exception:
+        pass
+
+
 def live_message(response) -> None:
     """Called for EVERY message of the Live receive loop, on the audio thread. Reads a few
     attributes, appends transcription text to the draft of the turn (errlog.note_speech) and,
@@ -527,6 +544,8 @@ def summarize(records, tz) -> dict:
             skipped += 1
             continue
         kind = r.get("kind")
+        if kind == "voice_wait":         # latency episodes: read by wait_summary(), not a call, not a skip
+            continue
         dt = parse_ts(r.get("ts"), tz)
         if dt is None or kind not in (*_CALL_KINDS, "live_session"):
             skipped += 1
@@ -618,3 +637,78 @@ def summarize(records, tz) -> dict:
     quota_events.sort(key=lambda e: e["ts"])
     return {"rows": out_rows, "totals": totals, "models_without_price": no_price,
             "quota_events": quota_events, "skipped": skipped}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Pure: the wait summary (spec 002, US3)
+# ═════════════════════════════════════════════════════════════════════════════
+WAIT_MIN_EPISODES = 30            # below this a p90/p99 is one unlucky turn, not a trend
+
+
+def _percentile(sorted_vals: list, p: float) -> int:
+    """Nearest-rank percentile of an ascending list: the ceil(p/100 * n)-th value. Always an
+    observed latency (no interpolation), so the same records give the same number on any
+    machine — and it needs no numpy."""
+    n = len(sorted_vals)
+    rank = -(-p * n // 100)                   # ceil(p * n / 100) without importing math
+    return int(round(sorted_vals[min(n, max(1, int(rank))) - 1]))
+
+
+def _wait_group(latencies: list) -> dict | None:
+    if not latencies:
+        return None
+    s = sorted(latencies)
+    return {"n": len(s), "p50": _percentile(s, 50), "p90": _percentile(s, 90), "p95": _percentile(s, 95)}
+
+
+def wait_summary(records) -> dict:
+    """``voice_wait`` records -> ``WaitSummary`` (data-model.md): outcome counts, what the
+    safety net did, latency percentiles split by "a tool ran before the first audio" and a
+    suggestion for the three limits. Anything that is not a ``voice_wait`` dict is ignored, and
+    so is a latency that is not a number (cancelled / no-reply episodes have none).
+
+    Suggestion rules (research.md R6), only with >= 30 latencies:
+      HUD "thinking" = p90 of the no-tool latencies rounded to 100 ms, kept in 800-3000 ms;
+      phrase         = max(HUD + 1500, p90 of all), kept in 2500-8000 ms;
+      give up        = max(20000, p99 of all + 5000), at most 60000 ms."""
+    episodes = 0
+    outcomes = {"audio": 0, "no_reply": 0, "gave_up": 0, "cancelled": 0}
+    fired = {"thinking": 0, "phrase": 0, "phrase_tone": 0, "gave_up": 0}
+    no_tool: list = []
+    with_tool: list = []
+    echo = 0
+    for r in records:
+        if not isinstance(r, dict) or r.get("kind") != "voice_wait":
+            continue
+        episodes += 1
+        if r.get("outcome") in outcomes:
+            outcomes[r["outcome"]] += 1
+        if r.get("thinking"):
+            fired["thinking"] += 1
+        if r.get("phrase") in ("voice", "tone"):
+            fired["phrase"] += 1
+            if r["phrase"] == "tone":
+                fired["phrase_tone"] += 1
+        if r.get("gave_up"):
+            fired["gave_up"] += 1
+        if r.get("echo_suspect"):
+            echo += 1
+        lat = _num(r.get("latency_ms"))
+        if lat is not None:
+            (with_tool if r.get("tool") else no_tool).append(lat)
+
+    n = len(no_tool) + len(with_tool)
+    suggested = None
+    if n >= WAIT_MIN_EPISODES:
+        everyone = sorted(no_tool + with_tool)
+        hud_base = _percentile(sorted(no_tool), 90) if no_tool else _percentile(everyone, 90)
+        hud = min(3000, max(800, int(round(hud_base / 100.0)) * 100))
+        phrase = min(8000, max(2500, hud + 1500, _percentile(everyone, 90)))
+        give_up = min(60000, max(20000, _percentile(everyone, 99) + 5000))
+        suggested = {"thinking_ms": hud, "phrase_ms": phrase, "give_up_ms": give_up}
+        note = "HUD = p90 sem ferramenta; frase = max(HUD + 1,5 s, p90); desistência = max(20 s, p99 + 5 s)"
+    else:
+        note = f"dados insuficientes ({n} de {WAIT_MIN_EPISODES})"
+    return {"episodes": episodes, "with_latency": n, "outcomes": outcomes,
+            "no_tool": _wait_group(no_tool), "tool": _wait_group(with_tool),
+            "fired": fired, "echo_suspect": echo, "suggested": suggested, "suggest_note": note}

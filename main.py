@@ -73,6 +73,7 @@ from memory.config_manager     import (
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     persona_instruction,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
+    get_wait_cue,
 )
 from core                     import gemini as _gemini
 from core                     import live_session as _live
@@ -85,6 +86,9 @@ from core                      import llm_usage
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
+from core                      import voice_preview as _voice_preview
+from core                      import wait_cue as _wait_cue
+from core.wait_cue             import Limits as WaitLimits, WaitWatchdog
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
@@ -639,6 +643,21 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        # Wait safety net (spec 002). Rebuilt on every connection; None before the
+        # first one, so every hook (interrupt, typed command) goes through _wait_call.
+        self._wait: WaitWatchdog | None = None
+        # The spoken phrase of the net goes through audio_in_queue (research R3), so
+        # "a cue is what is playing" must be known to cut it when the model answers
+        # and to release the mic when it ends with no answer behind it.
+        self._cue_playing = False
+        self._cue_mute_until = 0.0      # monotonic: mic blocks are dropped until then (R3b)
+        self._cue_echo_until = 0.0      # until then a transcript like the phrase is "echo"
+        self._cue_text = ""             # text of the phrase queued last ("" = the tone)
+        self._cue_audio_n0 = 0          # _model_audio_n when that phrase was queued
+        self._model_audio_n = 0         # bumped per slice of model audio; see _wait_play_cue
+        self._cue_voice   = ""          # voice/language of the CURRENT session: the cached
+        self._cue_lang    = "en"        # phrase must match the voice the user hears
+        self._cue_warned: set[tuple[str, str]] = set()   # (voice, lang) already told about
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
         self._tuned_live    = True  # turn-taking / media / thinking knobs; same fallback
@@ -733,6 +752,121 @@ class JarvisLive:
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
         self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' to wake me.")
+
+    # ── Wait safety net (spec 002): thin wrappers so a hook can never raise into
+    # the receive loop, and a bug is recorded instead of swallowed (constitution VII).
+    def _wait_call(self, name: str, *args):
+        w = self._wait
+        if w is None:
+            return None
+        try:
+            return getattr(w, name)(*args)
+        except Exception as e:
+            errlog.record_failure("voice", f"wait_hook.{name}", exc=e)
+            return None
+
+    def _wait_record(self, rec) -> None:
+        if rec:
+            llm_usage.record_voice_wait(rec)    # only queues a dict; no I/O here
+
+    def _wait_call_soon(self, name: str, *args) -> None:
+        """The watchdog has no lock: it is only ever touched on the asyncio loop.
+        Hooks that fire on the Qt or hotkey thread (typed command, interrupt) hop
+        onto the loop first instead of racing the 100 ms tick."""
+        loop = getattr(self, "_loop", None)
+        if loop is None or self._wait is None:
+            return
+        try:
+            loop.call_soon_threadsafe(lambda: self._wait_record(self._wait_call(name, *args)))
+        except RuntimeError:
+            pass            # loop already closed: the session is gone, nothing to close
+
+    async def _wait_play_cue(self, kind: str, only_while_waiting: bool = False) -> str | None:
+        """Queue the "hold"/"giveup" phrase (or the tone) on the playback queue.
+
+        The cache read runs in a thread (constitution III: no disk I/O on the loop that
+        moves audio); the queue is touched back on the loop. Returns "voice"/"tone",
+        or None when there is nothing to play on. ``only_while_waiting``: the model may
+        answer (or the user interrupt) while the cache is being read; then the phrase
+        is dropped instead of being queued behind real audio."""
+        w = self._wait
+        n0 = self._model_audio_n
+        pcm, how, text = await asyncio.to_thread(
+            _wait_cue.pcm_for, kind, self._cue_voice, self._cue_lang, None, True)
+        q = self.audio_in_queue
+        # Real audio always wins: if the queue is not empty (the tail of an earlier
+        # answer still playing) or the model's first slice arrived during the cache
+        # read, the phrase would land behind it and play late, after the answer.
+        if q is None or not q.empty() or self._model_audio_n != n0:
+            return None
+        if self._interrupted:
+            return None             # the user cut in while the cache was being read
+        if only_while_waiting and not (w is self._wait and w is not None and w.waiting):
+            return None
+        data = pcm.tobytes()
+        for i in range(0, len(data), 2400):     # 50 ms slices, like the receive loop
+            q.put_nowait(data[i:i + 2400])
+        self._cue_playing = True
+        self._cue_audio_n0 = self._model_audio_n    # interrupt(): has the model spoken since?
+        # Hard mute of the mic while the phrase can still be heard (R3b): the A/B test of
+        # 2026-10-19 showed its tail reaching the server as user speech mid-tool-call.
+        self._cue_mute_until = time.monotonic() + _wait_cue.cue_mute_s(
+            len(data) / 2 / 24000, self._out_latency)
+        self._cue_text = text
+        self._cue_echo_until = self._cue_mute_until + 3.0
+        return how
+
+    def _wait_phrase_failed(self, voice: str, lang: str, kind: str, msg: str) -> None:
+        """prefetch() runs in a daemon thread; record_failure and the UI facade are
+        both thread-safe. One log line per voice/language per run, every failure recorded."""
+        errlog.record_failure("voice", "wait_phrase", message=msg,
+                              context={"kind": kind, "voice": voice, "lang": lang})
+        if (voice, lang) not in self._cue_warned:
+            self._cue_warned.add((voice, lang))
+            self.ui.write_log(f"SYS: wait phrase unavailable ({msg}) — using a tone")
+
+    async def _wait_cue_loop(self) -> None:
+        """Ticks the watchdog every 100 ms and carries out what it asks for.
+        Dies with the session (TaskGroup); the watchdog is rebuilt per connection."""
+        prev_muted, prev_asleep = self.ui.muted, self._wake_enabled and not self._awake
+        while True:
+            await asyncio.sleep(0.1)
+            w = self._wait
+            if w is None:
+                continue
+            try:
+                muted = self.ui.muted
+                asleep = self._wake_enabled and not self._awake
+                # Cancel on the TRANSITION to muted/asleep, not while it holds: a typed
+                # request sent with the mic muted is still owed an answer (and a sign
+                # of life), and the mic is irrelevant to someone who typed.
+                if w.waiting:
+                    if muted and not prev_muted and w.source != "text":
+                        self._wait_record(w.cancel("muted"))
+                    elif asleep and not prev_asleep:
+                        self._wait_record(w.cancel("asleep"))
+                prev_muted, prev_asleep = muted, asleep
+                if not w.waiting:
+                    continue
+                actions, rec = w.tick()
+                for act in actions:
+                    if act == "thinking":
+                        self.ui.set_state("THINKING")
+                    elif act == "phrase":
+                        how = await self._wait_play_cue("hold", only_while_waiting=True)
+                        if how:
+                            w.phrase_played(how)
+                    elif act == "give_up":
+                        await self._wait_play_cue("giveup")
+                        errlog.record_failure(
+                            "voice", "wait_give_up", error_type="soft:no reply",
+                            context={"limits": (rec or {}).get("limits"),
+                                     "tool": (rec or {}).get("tool")})
+                        self.ui.write_log("SYS: No reply from the model — please repeat.")
+                        self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
+                self._wait_record(rec)
+            except Exception as e:
+                errlog.record_failure("voice", "wait_cue_loop", exc=e)
 
     async def _run_sleep_watch(self) -> None:
         """Auto-sleep after the configured silence window (wake-word mode only)."""
@@ -878,6 +1012,7 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
+        self._wait_call_soon("user_text")    # a typed request opens the wait episode (spec 002)
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -954,7 +1089,16 @@ class JarvisLive:
 
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
-        self._interrupted = True
+        # Only OUR phrase is playing (the model has sent no audio since it was queued, e.g.
+        # a tool is running): the answer that comes later is NOT part of what the user cut,
+        # so _interrupted stays off (it would discard that answer) and the turn state is
+        # untouched. Everything audible is still drained.
+        only_cue = self._cue_playing and self._model_audio_n == self._cue_audio_n0
+        if not only_cue:
+            self._interrupted = True
+        self._cue_playing = False
+        self._cue_mute_until = 0.0      # the user wants to talk: the mic opens now
+        self._wait_call_soon("cancel", "interrupt")
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -970,7 +1114,7 @@ class JarvisLive:
         # The words we were about to mouth are never going to be spoken now.
         self._visemes.reset()
         self._play_cursor = 0.0     # next batch starts a fresh timeline
-        if self._turn_done_event:
+        if self._turn_done_event and not only_cue:
             self._turn_done_event.clear()
         self.ui.write_log("SYS: Interrupted — listening...")
 
@@ -1402,6 +1546,12 @@ class JarvisLive:
                 # out until it can be tried on real hardware.
                 return
 
+            # The wait phrase may still be audible after the queue emptied (200 ms batch
+            # + 213 ms output latency, measured): its tail reached the server as user
+            # speech and the model answered it instead of the tool result (A/B 2026-10-19).
+            if time.monotonic() < self._cue_mute_until:
+                return
+
             # ── Echo tail ────────────────────────────────────────────────────
             # The speaking flag has dropped but the speakers have not finished.
             # Sending this to the model is how an assistant hears itself, decides
@@ -1683,6 +1833,20 @@ class JarvisLive:
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
+                            # First audio closes the wait episode (latency record).
+                            self._wait_record(self._wait_call("model_audio"))
+                            self._model_audio_n += 1
+                            if self._cue_playing:
+                                # Finish the phrase and pause, never cut it: the playback
+                                # takes ~200 ms per batch plus 213 ms of output latency
+                                # (measured), so cutting at the first model audio left ~0.4 s
+                                # of the phrase in the device buffer, glued to the answer
+                                # (real test 2026-10-19). 0.2 s of silence (2 slices of
+                                # 2400 bytes) separates them; from here the flow is the
+                                # model's. interrupt() still drains everything.
+                                self._cue_playing = False
+                                for _ in range(2):
+                                    self.audio_in_queue.put_nowait(bytes(2400))
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
                             # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
@@ -1717,10 +1881,34 @@ class JarvisLive:
                             if txt:
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
+                                # Live has no end-of-speech event: the last input
+                                # transcription chunk is the anchor (spec 002, research R1).
+                                _w = self._wait
+                                if (time.monotonic() < self._cue_echo_until
+                                        and _wait_cue.echo_suspect(txt, self._cue_text)):
+                                    # Diagnostic only (R3b): the record says our phrase may
+                                    # have been heard back, but a real utterance can look like
+                                    # it, so the flow below never changes.
+                                    self._wait_call("phrase_heard_back")
+                                _was_thinking = (_w is not None and _w.waiting
+                                                 and _w.thinking_shown and not self._cue_playing)
+                                self._wait_call("user_speech")
+                                if _was_thinking:       # spoke again: no longer "thinking"
+                                    self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
 
                         if sc.turn_complete:
                             if self._turn_done_event:
                                 self._turn_done_event.set()
+
+                            # Turn ended with no audio: the net may have put the HUD
+                            # on "thinking"; give it back (read the flag BEFORE closing).
+                            # Only an episode still open means "no audio": after audio the
+                            # playback loop owns the HUD (it may still have queue to play).
+                            _w = self._wait
+                            _was_thinking = _w is not None and _w.waiting and _w.thinking_shown
+                            self._wait_record(self._wait_call("turn_complete"))
+                            if _was_thinking:
+                                self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
 
                             # If this turn_complete ends an interrupted response, clear the
                             # flag and skip all further processing for that turn.
@@ -1777,11 +1965,14 @@ class JarvisLive:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
+                            self._wait_call("tool_started")    # a running tool is not a stalled model
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
+                        for _ in fn_responses:
+                            self._wait_call("tool_finished")
                         await self._flush_pending_vision()
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
@@ -1847,6 +2038,13 @@ class JarvisLive:
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
+                    if self._cue_playing and self.audio_in_queue.empty():
+                        # The phrase ended and no model audio followed: release the mic
+                        # (turn_done is not coming) and put "thinking" back if the wait goes on.
+                        self._cue_playing = False
+                        self.set_speaking(False)
+                        if self._wait is not None and self._wait.waiting:
+                            self.ui.set_state("THINKING")
                     continue
 
                 self.set_speaking(True)
@@ -2328,6 +2526,20 @@ class JarvisLive:
                     _connected = True
                     errlog.new_live_session()
                     llm_usage.live_session_start(live_model, get_voice(), _resumed_with)
+                    self._wait = WaitWatchdog(WaitLimits.from_config(get_wait_cue()))
+                    # Phrases for the voice of THIS session (a voice change rebuilds the
+                    # session, so it comes through here too); generated off-thread once.
+                    self._cue_playing = False
+                    self._cue_mute_until = 0.0      # a mute from the old connection must not
+                    self._cue_echo_until = 0.0      # outlive it (the mic would stay shut)
+                    self._cue_voice   = get_voice()
+                    self._cue_lang    = _voice_preview.language_code()
+                    _cv, _cl = self._cue_voice, self._cue_lang
+                    _wait_cue.prefetch(
+                        _cv, _cl,
+                        on_error=lambda kind, msg, _cv=_cv, _cl=_cl:
+                            self._wait_phrase_failed(_cv, _cl, kind, msg),
+                        live_model=live_model)
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
@@ -2359,6 +2571,7 @@ class JarvisLive:
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
+                    tg.create_task(self._wait_cue_loop())
                     tg.create_task(self._run_live_vision())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
@@ -2491,6 +2704,7 @@ class JarvisLive:
                 else:
                     self._conn_backoff = 3
             finally:
+                self._wait_record(self._wait_call("cancel", "session"))   # close an open episode
                 llm_usage.live_session_end(_end_reason, _end_ts)
                 errlog.set_live_session(None)
                 self.session = None
