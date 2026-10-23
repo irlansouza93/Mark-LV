@@ -275,6 +275,11 @@ class WaitWatchdog:
     def thinking_shown(self) -> bool:
         return self._thinking
 
+    @property
+    def tools_active(self) -> int:
+        """Tools started for the open episode and not finished yet (0 when idle)."""
+        return self._tool_active if self._state == _WAITING else 0
+
 
 # ── spoken phrases (spec 002 US2, research R3/R4/R4b) ────────────────────────
 RATE = 24000        # = RECEIVE_SAMPLE_RATE in main.py: the playback stream's rate

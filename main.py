@@ -535,11 +535,13 @@ class _ReconnectSignal(Exception):
     Carries `keep_context`: True for an ordinary rebuild, where the stored
     resumption handle is replayed and the conversation continues; False when the
     new session must genuinely start clean (see the voice-change note in
-    _on_voice_change)."""
+    _on_voice_change). `end_reason` is what the usage log records for the
+    session that ends ("go_away" when the server's time limit asked for it)."""
 
-    def __init__(self, keep_context: bool = True):
+    def __init__(self, keep_context: bool = True, end_reason: str = "voluntary"):
         super().__init__()
         self.keep_context = keep_context
+        self.end_reason   = end_reason
 
 
 def _is_reconnect_signal(exc: BaseException) -> bool:
@@ -563,6 +565,17 @@ def _keep_context_of(exc: BaseException) -> bool:
             if _is_reconnect_signal(sub):
                 return _keep_context_of(sub)
     return True
+
+
+def _end_reason_of(exc: BaseException) -> str:
+    """Read `end_reason` off a reconnect signal, unwrapping the TaskGroup's group."""
+    if isinstance(exc, _ReconnectSignal):
+        return getattr(exc, "end_reason", "voluntary")
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            if _is_reconnect_signal(sub):
+                return _end_reason_of(sub)
+    return "voluntary"
 
 
 class JarvisLive:
@@ -636,6 +649,20 @@ class JarvisLive:
         # conversation that never ends never produces a summary, and the
         # "yesterday we talked about…" line silently disappears.
         self._resume_handle: str | None = None
+
+        # ── GoAway / tool results across connections ───────────────────
+        # See core/live_session.py: the server caps a connection at ~10 min and
+        # warns with go_away first. Deadline and event are per connection.
+        self._go_away_deadline: float | None = None   # monotonic
+        self._go_away_event: asyncio.Event | None = None
+        self._session_t0       = 0.0
+        self._last_end_reason  = ""                   # how the previous connection ended
+        self._test_go_away_done = False               # JARVIS_TEST_GOAWAY fires once
+        self._test_go_away_on_tool: float | None = None
+        self._last_model_audio = 0.0                  # monotonic, last model audio chunk
+        self._results    = _live.ResultMailbox()      # tool results still owed to the model
+        self._tool_tasks: set[asyncio.Task] = set()   # detached tool runs (strong refs)
+        self._bg_tasks:   set[asyncio.Task] = set()   # result deliveries (strong refs)
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
         self._briefing_sent    = False          # morning briefing fires once per process
@@ -989,6 +1016,198 @@ class JarvisLive:
             + ("..." if keep else " (starting a fresh conversation)...")
         )
         raise _ReconnectSignal(keep_context=keep)
+
+    def _on_go_away(self, go_away) -> None:
+        """The server announced it will drop this connection (session time cap).
+        Only the first notice counts: the deadline never moves later."""
+        if self._go_away_deadline is not None:
+            return
+        raw  = getattr(go_away, "time_left", None)
+        left = _live.parse_time_left(raw)
+        self._go_away_deadline = time.monotonic() + left
+        age = time.monotonic() - self._session_t0
+        # Printed with the raw value: the cap and the notice time are not
+        # documented per model, and this line is how they get measured.
+        print(f"[JARVIS] ⏳ GoAway after {age:.0f}s — server closes the connection "
+              f"in {left:.1f}s (time_left={raw!r})")
+        if self._go_away_event is not None:
+            self._go_away_event.set()
+
+    async def _watch_go_away(self):
+        """Session-scoped task: after a GoAway, renew the connection at the first
+        quiet moment and, whatever is going on, before the server's deadline —
+        a client still connected then is dropped with 1008 and loses whatever
+        was in flight. Resumes with the handle, so the conversation carries on."""
+        assert self._go_away_event is not None
+        await self._go_away_event.wait()
+        while True:
+            now     = time.monotonic()
+            left    = self._go_away_deadline - now
+            playing = self._is_speaking or not self.audio_in_queue.empty()
+            # A reply still owed (spec 002's wait episode: the user spoke or
+            # typed and no model audio came yet) is not a quiet moment: the
+            # resumption handle predates that request, so renewing now would
+            # silently drop the question.
+            _w = self._wait
+            if _live.go_away_should_reconnect(
+                    left, playing=playing,
+                    model_quiet_s=now - self._last_model_audio,
+                    user_quiet_s=now - self._last_user_speech,
+                    reply_owed=bool(_w is not None and _w.waiting),
+                    tools_running=_w.tools_active if _w is not None else 0):
+                break
+            await asyncio.sleep(0.1)
+        if left <= _live.GO_AWAY_MARGIN_S:
+            # No quiet moment before the deadline: whatever was playing or owed
+            # is cut here (a tool result in flight is replayed by the next session).
+            errlog.record_failure("live", "go_away_forced", error_type="soft:go_away deadline",
+                                  context={"left_s": round(left, 1), "playing": playing,
+                                           "tools_running": len(self._tool_tasks)})
+        print(f"[JARVIS] ⏳ Renewing the connection ({left:.1f}s before the deadline, "
+              f"{len(self._tool_tasks)} tool(s) running)")
+        self.ui.write_log("SYS: Session time limit — renewing the connection...")
+        raise _ReconnectSignal(keep_context=True, end_reason="go_away")
+
+    async def _test_go_away(self, spec: str) -> None:
+        """Dev hook: JARVIS_TEST_GOAWAY="AFTER,LEFT" (seconds, default LEFT=20)
+        feeds this connection a fake GoAway AFTER seconds in, once per process,
+        so the renewal path can be tried in a minute instead of waiting for the
+        real ~10 min cap. Same path as the server's notice from _on_go_away on.
+        AFTER may be "tool": the notice then arrives as the next tool starts —
+        the case that lost a web_search result on 2026-10-19."""
+        after, _, left = spec.partition(",")
+        try:
+            left = float(left or 20)
+            after = None if after.strip() == "tool" else float(after)
+        except ValueError:
+            print(f"[JARVIS] JARVIS_TEST_GOAWAY={spec!r} ignored (expected AFTER|tool,LEFT)")
+            return
+        if after is None:
+            self._test_go_away_on_tool = left
+            return
+        await asyncio.sleep(after)
+        print("[JARVIS] 🧪 Test GoAway injected")
+        self._on_go_away(types.LiveServerGoAway(time_left=f"{left:g}s"))
+
+    def _spawn(self, coro) -> None:
+        """create_task with a strong reference: the loop keeps only a weak one."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    def _start_tool_call(self, tool_call) -> None:
+        """Run one tool_call message outside the receive loop and the session.
+
+        Inline, the receive loop sat in the tool for its whole run (a research
+        web_search: 14 s+) and read nothing — a GoAway arriving meanwhile went
+        unseen until the server dropped the socket with 1008, and the TaskGroup
+        teardown cancelled the tool together with its result (2026-10-19).
+        Detached, the loop keeps reading and the result outlives the session."""
+        w = self._wait          # this connection's watchdog (spec 002 is per session)
+        for _ in tool_call.function_calls:
+            self._wait_call("tool_started")      # a running tool is not a stalled model
+        if self._test_go_away_on_tool is not None:   # dev hook, see _test_go_away
+            left, self._test_go_away_on_tool = self._test_go_away_on_tool, None
+            print("[JARVIS] 🧪 Test GoAway injected (tool started)")
+            self._on_go_away(types.LiveServerGoAway(time_left=f"{left:g}s"))
+        task = asyncio.create_task(self._run_tool_call(self.session, w, tool_call))
+        self._tool_tasks.add(task)          # the loop keeps only a weak reference
+        task.add_done_callback(self._tool_tasks.discard)
+
+    async def _run_tool_call(self, session, w, tool_call) -> None:
+        fn_responses, entries, vision = [], [], None
+        for fc in tool_call.function_calls:
+            print(f"[JARVIS] 📞 {fc.name}")
+            try:
+                fr = await self._execute_tool(fc)
+            except Exception as e:
+                # Every call must get a response: a blocking call left unanswered
+                # keeps the model waiting with the user in silence.
+                errlog.record_failure("inline_tool", fc.name, exc=e, phase="dispatch")
+                traceback.print_exc()
+                fr = types.FunctionResponse(id=fc.id, name=fc.name,
+                                            response={"result": f"Tool '{fc.name}' failed: {e}"})
+            fn_responses.append(fr)
+            if (fc.name == "screen_process"
+                    and str((fr.response or {}).get("result", "")).startswith("[VISION_ACTIVE]")):
+                # Its result says "the image is arriving with this result":
+                # replayed without the image it would make the model invent one.
+                # (A cooldown or camera-error result is replayed as it is.)
+                vision = self._pending_vision
+                entries.append(_live.result_entry(fc.name, dict(fc.args or {}),
+                                                  {"result": _live.VISION_LOST_RESULT}))
+            else:
+                entries.append(_live.result_entry(fc.name, dict(fc.args or {}), fr.response,
+                                                  getattr(fr, "scheduling", None)))
+        why = "connection renewed"
+        if session is not None and session is self.session:
+            try:
+                await session.send_tool_response(function_responses=fn_responses)
+                why = ""
+            except Exception as e:
+                # The connection died while the tool ran; the receive loop sees
+                # the same closure and rebuilds the session.
+                why = f"{type(e).__name__}: {e}"
+        if why or session is not self.session:
+            # Re-checked after the await: the session may have ended meanwhile.
+            self._drop_vision(vision)
+            self._park_results(entries, why or "connection renewed")
+            return
+        self._results.sent(entries)
+        if w is not None and w is self._wait:
+            for _ in fn_responses:
+                self._wait_call("tool_finished")
+        try:
+            await self._flush_pending_vision(session)
+        except Exception as e:
+            errlog.record_failure("live", "vision_flush", exc=e)
+            traceback.print_exc()
+
+    def _drop_vision(self, vision) -> None:
+        """A screen_process whose session is gone: its frame must not ride along
+        with some later, unrelated tool response, and a camera it opened must
+        not stay on."""
+        if vision is None or self._pending_vision is not vision:
+            return
+        self._pending_vision = None
+        self._vision_busy    = False
+        if vision[3] == "camera" and self._vision_cam_active:
+            self._vision_cam_active = False
+            if not self._live_vision:
+                self.ui.stop_camera_stream()
+
+    def _park_results(self, entries, why: str) -> None:
+        self._results.park(entries)
+        if not self._results.pending:
+            return
+        print(f"[JARVIS] 📦 Tool result kept for the conversation ({why[:120]})")
+        if self.session is not None:
+            self._spawn(self._deliver_parked())
+
+    async def _deliver_parked(self) -> None:
+        """Hand tool results that never reached the model to the current session,
+        as text (a function response cannot be replayed: see core/live_session.py)."""
+        session = self.session
+        if session is None or not self._results.pending:
+            return
+        entries = self._results.take()
+        try:
+            await session.send_client_content(
+                turns={"role": "user", "parts": [{"text": _live.orphan_prompt(entries)}]},
+                turn_complete=True,
+            )
+        except BaseException as e:
+            self._results.put_back(entries)
+            if not isinstance(e, Exception):
+                raise                       # cancelled with its session: next one delivers
+            # Usually the dying session; the next connection delivers them.
+            errlog.record_failure("live", "deliver_parked", exc=e,
+                                  context={"results": len(entries)})
+            if self.session is not None and self.session is not session:
+                self._spawn(self._deliver_parked())
+            return
+        print(f"[JARVIS] 📬 {len(entries)} tool result(s) handed over after reconnect")
+        self._results.sent(entries)         # still owed an answer if this one drops too
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -1764,7 +1983,7 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Vision] live frame failed: {e}")
 
-    async def _flush_pending_vision(self) -> bool:
+    async def _flush_pending_vision(self, session=None) -> bool:
         """Send a captured frame immediately after its tool response.
 
         The frame is already in hand by the time `screen_process` returns — the
@@ -1775,7 +1994,8 @@ class JarvisLive:
         Sending it here means the model has the tool result and the image before
         it generates anything, so the user gets one answer, sooner.
         """
-        if not (self._pending_vision and self.session):
+        session = session or self.session
+        if not (self._pending_vision and session):
             return False
 
         import base64 as _b64
@@ -1790,7 +2010,7 @@ class JarvisLive:
         # label *means* is explained once, in the generated [SELF] block.
         src = ("[IMAGE SOURCE: WEBCAM]" if angle == "camera"
                else "[IMAGE SOURCE: SCREEN CAPTURE]")
-        await self.session.send_client_content(
+        await session.send_client_content(
             turns={"role": "user", "parts": [
                 {"inline_data": {"mime_type": mime_t, "data": b64}},
                 {"text": f"{src}\n\n{question}"},
@@ -1829,10 +2049,18 @@ class JarvisLive:
                                 print("[JARVIS] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
 
+                    # The server's ~10 min cap: _watch_go_away renews the
+                    # connection before it is dropped with 1008.
+                    _ga = getattr(response, "go_away", None)
+                    if _ga is not None:
+                        self._on_go_away(_ga)
+
                     if response.data:
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
+                            self._last_model_audio = time.monotonic()
+                            self._results.heard()
                             # First audio closes the wait episode (latency record).
                             self._wait_record(self._wait_call("model_audio"))
                             self._model_audio_n += 1
@@ -1899,6 +2127,7 @@ class JarvisLive:
                         if sc.turn_complete:
                             if self._turn_done_event:
                                 self._turn_done_event.set()
+                            self._results.answered()
 
                             # Turn ended with no audio: the net may have put the HUD
                             # on "thinking"; give it back (read the flag BEFORE closing).
@@ -1962,18 +2191,7 @@ class JarvisLive:
                                 asyncio.create_task(_cam_close())
 
                     if response.tool_call:
-                        fn_responses = []
-                        for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
-                            self._wait_call("tool_started")    # a running tool is not a stalled model
-                            fr = await self._execute_tool(fc)
-                            fn_responses.append(fr)
-                        await self.session.send_tool_response(
-                            function_responses=fn_responses
-                        )
-                        for _ in fn_responses:
-                            self._wait_call("tool_finished")
-                        await self._flush_pending_vision()
+                        self._start_tool_call(response.tool_call)
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
@@ -2521,6 +2739,9 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._go_away_deadline     = None
+                    self._go_away_event        = asyncio.Event()
+                    self._session_t0           = time.monotonic()
 
                     print("[JARVIS] Connected.")
                     _connected = True
@@ -2548,12 +2769,17 @@ class JarvisLive:
 
                     # Wake word: if enabled, come up ASLEEP (mic gated, silent)
                     # until the user says "Hey Jarvis" or taps wake in the UI.
-                    if self._wake_enabled:
+                    # A GoAway renewal (~every 10 min) is the same conversation:
+                    # someone awake when it happened stays awake.
+                    _stay_awake = self._last_end_reason == "go_away" and self._awake
+                    if self._wake_enabled and not _stay_awake:
                         self._ensure_wake_detector()
                         self._awake = False
                         self.ui.set_state("SLEEPING")
                         self.ui.write_log(f"SYS: {self._asst_name} online — sleeping. Say 'Hey Jarvis' to wake me.")
                     else:
+                        if self._wake_enabled:
+                            self._ensure_wake_detector()
                         self._awake = True
                         self.ui.set_state("LISTENING")
                         self.ui.write_log(f"SYS: {self._asst_name} online.")
@@ -2563,6 +2789,16 @@ class JarvisLive:
 
                     self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self._watch_reconnect())
+                    tg.create_task(self._watch_go_away())
+                    import os as _os
+                    _test_ga = _os.environ.get("JARVIS_TEST_GOAWAY")
+                    if _test_ga and not self._test_go_away_done:
+                        self._test_go_away_done = True
+                        tg.create_task(self._test_go_away(_test_ga))
+                    if self._results.pending:
+                        # A tool finished while the previous connection was
+                        # going away: its answer is still owed to the user.
+                        tg.create_task(self._deliver_parked())
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
@@ -2597,7 +2833,7 @@ class JarvisLive:
                 # session immediately with no backoff and no scary logs.
                 if _is_reconnect_signal(e):
                     print("[JARVIS] Voluntary reconnect requested.")
-                    _end_reason, _end_ts = "voluntary", time.time()
+                    _end_reason, _end_ts = _end_reason_of(e), time.time()
                     if not _keep_context_of(e):
                         # A deliberate clean slate (voice change) — drop the
                         # handle so the next connect really does start empty.
@@ -2705,6 +2941,10 @@ class JarvisLive:
                     self._conn_backoff = 3
             finally:
                 self._wait_record(self._wait_call("cancel", "session"))   # close an open episode
+                # Results sent but not yet answered when the connection went
+                # are handed to the next session with the ones never sent.
+                self._results.session_ended()
+                self._last_end_reason = _end_reason
                 llm_usage.live_session_end(_end_reason, _end_ts)
                 errlog.set_live_session(None)
                 self.session = None

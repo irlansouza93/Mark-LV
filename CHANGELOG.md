@@ -43,6 +43,25 @@ PATCH a cada correção. Tags: `v55.x.y`.
   Irlan em 2026-10-17.
 
 ### Fixed
+- **Sessão de voz caía a cada ~10 min (GoAway)**: o servidor do Gemini Live avisa com `go_away`
+  (e `time_left`) antes de fechar a conexão no limite de tempo; o app ignorava o aviso e era
+  derrubado com `1008 (policy violation)` (56 vezes em 2026-10-19). Agora renova a conexão com o
+  handle de retomada no primeiro momento de silêncio (sem áudio do modelo, sem fala do usuário e
+  sem resposta devida a uma pergunta) e, em qualquer caso, 3 s antes do prazo; o fim fica
+  registrado como `go_away` no uso de LLM. No modo wake-word, quem estava acordado continua
+  acordado depois da renovação.
+  As ferramentas passam a rodar fora do laço de recepção (antes ele ficava cego durante uma
+  pesquisa de 14 s+ e não via o aviso). Efeito visível: uma ferramenta `NON_BLOCKING` agora deixa
+  o modelo falar enquanto roda, e dois pedidos seguidos podem rodar ao mesmo tempo. Um resultado
+  cuja conexão acabou — ou cuja resposta falada foi cortada — é entregue como texto, delimitado
+  e marcado como dado, à sessão nova, para o usuário ouvir a resposta; a captura de
+  `screen_process` não atravessa a reconexão (o modelo avisa e oferece olhar de novo, e a câmera
+  aberta por ela é fechada). Ferramenta que levanta exceção agora devolve um erro ao modelo em vez
+  de deixá-lo esperando (`core/live_session.py`: `go_away_should_reconnect`, `ResultMailbox`,
+  `orphan_prompt`). Para testar sem esperar 10 min: `JARVIS_TEST_GOAWAY=40,20` simula o aviso
+  aos 40 s com 20 s de prazo, e `JARVIS_TEST_GOAWAY=tool,20` simula o aviso quando a próxima
+  ferramenta começa.
+
 Bugs do código do upstream vistos nos logs reais da validação da spec 001 (2026-10-17):
 - `open_app` dizia "Opened C:\…\arquivo.txt." para um arquivo que não existe (o `:` do drive caía
   no ramo `start <nome>`, que volta antes do Windows mostrar o erro). Caminho absoluto inexistente
