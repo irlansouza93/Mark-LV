@@ -80,11 +80,12 @@ def test_generates_files_then_waits_for_one_confirmation(env):
     assert (env["rw"] / "Projects" / "demo" / "main.py").read_text() == "print('hi')"
     assert "[CONFIRMATION_PENDING]" in out and "generated" in out
     assert env["runs"] == []            # no pip, no run yet
-    assert env["vscode"]                # opening the editor is not confirmed
+    assert env["vscode"] == []          # a .vscode/tasks.json could run code: open only after CONFIRM
     shows = [g for g in env["got"] if isinstance(g, tuple)]
     assert len(shows) == 1
     assert shows[0][1] == "Install and run demo"
     assert "requests" in shows[0][2] and "python main.py" in shows[0][2]
+    assert "auto-installs missing packages" in shows[0][2] and "up to 3" in shows[0][2]
 
 
 def test_confirm_installs_and_runs(env):
@@ -92,7 +93,8 @@ def test_confirm_installs_and_runs(env):
     confirm.resolve(True)
     assert env["ev"].wait(2.0)
     assert any("pip" in c for c in env["runs"]) and any(c[-1] == "main.py" for c in env["runs"])
-    assert env["got"][-1].startswith("[CONFIRMED_RESULT] Install and run demo:")
+    assert env["got"][-1].startswith("[CONFIRMED_RESULT] Install and run demo")
+    assert len(env["vscode"]) == 1       # opened by the confirmed run, not before
 
 
 def test_cancel_runs_nothing(env):
@@ -118,3 +120,28 @@ def test_fix_files_cannot_escape_either(env):
     proj.mkdir(parents=True)
     da._fix_files("boom", "d", [], {"../evil.py": "x"}, "python", proj, "../evil.py")
     assert not (env["rw"] / "Projects" / "evil.py").exists()
+
+
+def test_workspace_config_files_are_skipped_and_named(env):
+    env["plan"]["files"] += [
+        {"path": ".vscode/tasks.json", "description": "x", "imports": []},
+        {"path": ".git/hooks/pre-commit", "description": "x", "imports": []},
+        {"path": "sub/.VSCODE/settings.json", "description": "x", "imports": []},
+    ]
+    out = build()
+    proj = env["rw"] / "Projects" / "demo"
+    assert (proj / "main.py").exists()
+    assert not (proj / ".vscode").exists() and not (proj / ".git").exists()
+    assert ".vscode/tasks.json" in out and ".git/hooks/pre-commit" in out
+    assert "[CONFIRMATION_PENDING]" in out
+
+
+def test_fix_files_skips_workspace_config(env):
+    proj = env["rw"] / "Projects" / "demo"
+    proj.mkdir(parents=True)
+    da._fix_files("boom", "d", [], {".vscode/tasks.json": "x"}, "python", proj, "main.py")
+    assert not (proj / ".vscode").exists()
+
+
+def test_install_and_run_is_a_module_level_function():
+    assert callable(getattr(da, "_install_and_run", None))

@@ -177,3 +177,30 @@ def test_denied_copy_of_a_folder_with_secrets_is_refused_or_filtered(secrets):
     """Copying the config folder as a whole must not smuggle the key out."""
     out = run(action="copy", path=str(secrets["app"]), name="config", destination=str(secrets["rw"]))
     assert out.startswith(MARK) or not list(secrets["rw"].rglob("api_keys.json"))
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("bad", ["ABS", r"..\x", "../x", "sub/x", r"sub\x"])
+def test_rename_refuses_new_name_that_is_not_a_bare_name(env, bad):
+    (env["rw"] / "a.txt").write_text("a")
+    new = str(env["outside"] / "x.txt") if bad == "ABS" else bad
+    (env["rw"] / "sub").mkdir()
+    out = run(action="rename", path=str(env["rw"]), name="a.txt", new_name=new)
+    assert (env["rw"] / "a.txt").exists()
+    assert not (env["outside"] / "x.txt").exists()
+    assert not (env["tmp"] / "x").exists() and not (env["rw"] / "sub" / "x").exists()
+    assert "bare name" in out
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows only")
+def test_copy_folder_does_not_follow_junctions(env):
+    import _winapi
+    (env["outside"] / "secret.txt").write_text("s")
+    (env["rw"] / "proj").mkdir()
+    (env["rw"] / "proj" / "ok.txt").write_text("ok")
+    _winapi.CreateJunction(str(env["outside"]), str(env["rw"] / "proj" / "jn"))
+    out = run(action="copy", path=str(env["rw"]), name="proj", destination=str(env["rw"] / "copy"))
+    assert (env["rw"] / "copy" / "ok.txt").exists()
+    assert not (env["rw"] / "copy" / "jn").exists()
+    assert "jn" in out

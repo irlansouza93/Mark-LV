@@ -1247,13 +1247,19 @@ class JarvisLive:
         if not self._loop or not self.session:
             self.ui.write_log(f"SYS: {text}")
             return
-        asyncio.run_coroutine_threadsafe(
+        fut = asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
                 turn_complete=True
             ),
             self._loop
         )
+        # Nobody awaits this future: without a callback a dropped session would lose
+        # the program's output with no trace (review of spec 003).
+        fut.add_done_callback(
+            lambda f: not f.cancelled() and f.exception() and errlog.record_failure(
+                component="confirm", name="deliver_to_model", exc=f.exception(),
+                message="could not hand the confirmed result to the model"))
 
     def _tail_active(self) -> bool:
         """True while the speakers may still be finishing our last sentence."""
@@ -2996,4 +3002,4 @@ def main():
     ui.root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    main()

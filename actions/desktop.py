@@ -85,6 +85,8 @@ def _build_sandbox() -> dict:
 def _execute_generated_code(code: str, player=None) -> str:
     if not code or code.strip() == "UNSAFE":
         return "This action cannot be performed safely."
+    if code.lstrip().startswith("ERROR:"):     # same reason as _confirmed_task
+        return code
 
     # Kod temizleme
     if code.startswith("```"):
@@ -159,8 +161,12 @@ def _confirmed_task(code: str, player=None) -> str:
     # The model's own code runs only after the user says yes on the HUD banner (FR-006).
     # There is no path to decide, so the banner shows the first 12 lines of what will run;
     # report=True hands the outcome back to the model once the user answers.
-    if not code or code.strip() == "UNSAFE" or code.startswith("ERROR:"):
+    if not code or code.strip() == "UNSAFE":
         return _execute_generated_code(code, player=player)
+    if code.lstrip().startswith("ERROR:"):
+        # "ERROR: unsafe" is a valid Python annotation: exec would run the lines after it
+        # with no banner. It is an error message, so it goes back as text, never as code.
+        return code
     detail = chr(10).join(code.strip().splitlines()[:12])
     return confirm.request(
         key="desktop_task", title="Run a desktop task", detail=detail,

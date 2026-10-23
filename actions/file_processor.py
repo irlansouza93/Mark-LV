@@ -747,14 +747,16 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
         try:
             # Member by member through confined(): shutil.unpack_archive would write a
             # "../evil.txt" entry outside dest (zip-slip). An escaping member is skipped
-            # and named, the rest is extracted (FR-012).
+            # and named, the rest is extracted (FR-012). require() on top of confined():
+            # a member inside dest can still be .git/hooks/pre-commit or .env (review 003).
             import zipfile, tarfile
             skipped, count = [], 0
             if path.suffix.lower() == ".zip":
                 with zipfile.ZipFile(path) as z:
                     for info in z.infolist():
                         try:
-                            target = fs_policy.confined(dest, info.filename)
+                            target = fs_policy.require(fs_policy.confined(dest, info.filename),
+                                                   "write", actor="file_processor")
                         except fs_policy.PolicyDenied:
                             skipped.append(info.filename)
                             continue
@@ -772,7 +774,8 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
                             skipped.append(m.name)      # links/devices never leave the archive
                             continue
                         try:
-                            target = fs_policy.confined(dest, m.name)
+                            target = fs_policy.require(fs_policy.confined(dest, m.name),
+                                                   "write", actor="file_processor")
                         except fs_policy.PolicyDenied:
                             skipped.append(m.name)
                             continue

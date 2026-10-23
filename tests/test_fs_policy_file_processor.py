@@ -72,3 +72,34 @@ def test_extract_skips_member_that_escapes(env):
     assert (dest / "ok.txt").read_text() == "fine"
     assert not (env["rw"] / "evil.txt").exists()
     assert "evil.txt" in out and "skipped" in out.lower()
+
+
+def _protected_names():
+    return [".git/hooks/pre-commit", ".env", "ok.txt"]
+
+
+def test_extract_zip_skips_protected_members(env):
+    z = env["rw"] / "a.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for n in _protected_names():
+            zf.writestr(n, "x")
+    dest = env["rw"] / "out"
+    out = fp.file_processor({"file_path": str(z), "action": "extract", "destination": str(dest)})
+    assert (dest / "ok.txt").exists()
+    assert not (dest / ".env").exists() and not (dest / ".git").exists()
+    assert ".env" in out and "pre-commit" in out
+
+
+def test_extract_tar_skips_protected_members(env):
+    import io, tarfile
+    t = env["rw"] / "a.tar"
+    with tarfile.open(t, "w") as tf:
+        for n in _protected_names():
+            ti = tarfile.TarInfo(n)
+            ti.size = 1
+            tf.addfile(ti, io.BytesIO(b"x"))
+    dest = env["rw"] / "out"
+    out = fp.file_processor({"file_path": str(t), "action": "extract", "destination": str(dest)})
+    assert (dest / "ok.txt").exists()
+    assert not (dest / ".env").exists() and not (dest / ".git").exists()
+    assert ".env" in out and "pre-commit" in out

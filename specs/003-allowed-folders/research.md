@@ -147,3 +147,15 @@ alternativas.
 - **Decisão:** só duas descrições mudam: `file_controller.path` ganha "(allowed folders only)"
   (+22 caracteres) e `code_helper.file_path` o mesmo (+22). Total ≈ +44 caracteres em toda
   conexão; nenhuma ferramenta nova. As recusas explicam o resto quando acontecem.
+
+## R11 — Limites conhecidos (revisão independente, 2026-10-23)
+
+- **TOCTOU:** entre o `realpath` da política e a abertura do arquivo, outro processo pode trocar
+  um diretório por um link; a política decide sobre o que existia no instante da checagem.
+- **Hardlinks não são detectados:** um arquivo com duas entradas (uma permitida, outra negada) é
+  decidido pelo nome usado; `realpath` não resolve hardlinks.
+- **Formas `\?\` e UNC:** de um caminho negado só são seguras enquanto o usuário não permitir essa
+  forma da pasta; a lista de negados compara o caminho normalizado, não a identidade do arquivo.
+- **`open_app` com injeção de shell** (texto do modelo vai para o shell) fica fora desta spec;
+  vira uma spec futura sobre execução de programas.
+- Fluxos de dados (ADS `arquivo:fluxo`) são recusados como `invalid` no Windows.

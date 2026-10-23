@@ -155,6 +155,22 @@ JSON:"""
             raise RateLimitError(str(e))
         raise
 
+# Folders whose contents run code by themselves when the project is opened or committed:
+# .vscode/tasks.json with runOn=folderOpen runs when VS Code opens the folder, a git hook
+# on the first commit. A generated project has no business writing them (review of spec 003).
+_SELF_RUNNING_DIRS = {".vscode", ".git"}
+
+
+def _checked_path(project_dir: Path, rel: str) -> Path:
+    """confined() + the policy + the self-running folders; raises PolicyDenied."""
+    full = fs_policy.require(fs_policy.confined(project_dir, rel), "write", actor="dev_agent")
+    if any(part.casefold() in _SELF_RUNNING_DIRS for part in re.split(r"[\\/]+", rel)):
+        raise fs_policy.PolicyDenied(fs_policy.Decision(
+            False, full, "write", "denied", actor="dev_agent",
+            deny_reason="VS Code and git settings run code on their own"))
+    return full
+
+
 def _write_file(
     file_info: dict,
     project_description: str,
@@ -166,7 +182,7 @@ def _write_file(
     file_path = file_info["path"]
     # The model names the paths: confine to the project, then ask the policy, before the
     # (60 s) model call so an escaping file costs nothing (FR-012).
-    full_path = fs_policy.require(fs_policy.confined(project_dir, file_path), "write", actor="dev_agent")
+    full_path = _checked_path(project_dir, file_path)
     model = _get_model(MODEL_WRITER)
 
     file_desc = file_info.get("description", "")
@@ -384,7 +400,7 @@ def _fix_files(
 
     for fix_path in files_to_fix:
         try:
-            full_path = fs_policy.require(fs_policy.confined(project_dir, fix_path), "write", actor="dev_agent")
+            full_path = _checked_path(project_dir, fix_path)
         except fs_policy.PolicyDenied as e:
             print(f"[DevAgent] ⚠️ Not fixing {fix_path}: {e}")
             continue
@@ -534,81 +550,92 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    opened = _open_vscode(project_dir)
-
-    def install_and_run() -> str:
-        # Both steps are irreversible (pip install, running generated code), so they sit
-        # behind one confirmation instead of running inside the tool call (Principle IV).
-        if dependencies:
-            install_result = _install_dependencies(dependencies, project_dir)
-            log(install_result)
-
-        last_output   = ""
-        auto_installs = 0  
-
-        for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
-            log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
-            last_output = _run_project(run_command, project_dir, timeout)
-            log(f"Output preview: {last_output[:150]}")
-
-            if not _has_error(last_output, run_command):
-                msg = (
-                    f"Project '{proj_name}' is working, sir. "
-                    f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
-                    f"Saved to: {project_dir}"
-                )
-                if speak: speak(msg)
-                return f"{msg}\n\nOutput:\n{last_output}"
-
-            if attempt == MAX_FIX_ATTEMPTS:
-                break
-
-            error_type = _classify_error(last_output)
-            if error_type == "dependency_error" and auto_installs < 3:
-                installed = _try_auto_install(last_output, project_dir)
-                if installed:
-                    auto_installs += 1
-                    log("Missing dependency installed, retrying...")
-                    time.sleep(1)
-                    continue
-
-            log(f"Fixing errors (type: {error_type})...")
-            try:
-                updated = _fix_files(
-                    error_output=last_output,
-                    project_description=description,
-                    all_files=files,
-                    file_codes=file_codes,
-                    language=language,
-                    project_dir=project_dir,
-                    entry_point=entry_point,
-                )
-                file_codes.update(updated)
-                time.sleep(1)
-            except RateLimitError:
-                msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
-                if speak: speak(msg)
-                return msg
-            except Exception as e:
-                log(f"Fix step failed: {e}")
-
-        msg = (
-            f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
-            f"Project is saved at {project_dir} — open it in VSCode and check manually."
-        )
-        if speak: speak(msg)
-        return f"{msg}\n\nLast error:\n{last_output[:600]}"
-
-
     deps = ", ".join(dependencies) if dependencies else "none"
     pending = confirm.request(
         key="dev_agent_run", title=f"Install and run {proj_name}",
-        detail=f"Dependencies: {deps}\nRun: {run_command}\nIn: {project_dir}",
-        run=install_and_run, report=True)
-    note = f" Skipped (outside the project folder): {', '.join(skipped)}." if skipped else ""
+        detail=(f"Dependencies: {deps}\nRun: {run_command}\nIn: {project_dir}\n"
+                "Also auto-installs missing packages it reports (up to 3), then opens VS Code."),
+        run=lambda: _install_and_run(
+            dependencies=dependencies, project_dir=project_dir, run_command=run_command,
+            timeout=timeout, description=description, files=files, file_codes=file_codes,
+            language=language, entry_point=entry_point, proj_name=proj_name,
+            speak=speak, log=log),
+        report=True)
+    note = f" Skipped (outside the project folder or self-running settings): {', '.join(skipped)}." if skipped else ""
     return (f"Project '{proj_name}' generated at {project_dir} ({len(file_codes)} files, "
-            f"{'opened in VS Code' if opened else 'VS Code did not open'}).{note} Installing dependencies and running it is waiting for "
+            f"VS Code opens after you confirm).{note} Installing dependencies and running it is waiting for "
             f"the user's on-screen confirmation. {pending}")
+
+
+def _install_and_run(*, dependencies, project_dir, run_command, timeout, description,
+                     files, file_codes, language, entry_point, proj_name, speak, log) -> str:
+    """The irreversible half of dev_agent: pip install, open the editor, run, fix, re-run.
+
+    Called only by the confirmed callable (Principle IV). It is a module-level function
+    (not a closure) so the original loop below keeps its indentation and the diff against
+    upstream stays small. VS Code opens here, after CONFIRM: a .vscode/tasks.json with
+    runOn=folderOpen would run code before the banner otherwise (review of spec 003)."""
+    if dependencies:
+        install_result = _install_dependencies(dependencies, project_dir)
+        log(install_result)
+
+    _open_vscode(project_dir)
+
+    last_output   = ""
+    auto_installs = 0  
+
+    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
+        log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
+        last_output = _run_project(run_command, project_dir, timeout)
+        log(f"Output preview: {last_output[:150]}")
+
+        if not _has_error(last_output, run_command):
+            msg = (
+                f"Project '{proj_name}' is working, sir. "
+                f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
+                f"Saved to: {project_dir}"
+            )
+            if speak: speak(msg)
+            return f"{msg}\n\nOutput:\n{last_output}"
+
+        if attempt == MAX_FIX_ATTEMPTS:
+            break
+
+        error_type = _classify_error(last_output)
+        if error_type == "dependency_error" and auto_installs < 3:
+            installed = _try_auto_install(last_output, project_dir)
+            if installed:
+                auto_installs += 1
+                log("Missing dependency installed, retrying...")
+                time.sleep(1)
+                continue
+
+        log(f"Fixing errors (type: {error_type})...")
+        try:
+            updated = _fix_files(
+                error_output=last_output,
+                project_description=description,
+                all_files=files,
+                file_codes=file_codes,
+                language=language,
+                project_dir=project_dir,
+                entry_point=entry_point,
+            )
+            file_codes.update(updated)
+            time.sleep(1)
+        except RateLimitError:
+            msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
+            if speak: speak(msg)
+            return msg
+        except Exception as e:
+            log(f"Fix step failed: {e}")
+
+    msg = (
+        f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
+        f"Project is saved at {project_dir} — open it in VSCode and check manually."
+    )
+    if speak: speak(msg)
+    return f"{msg}\n\nLast error:\n{last_output[:600]}"
 
 
 def dev_agent(

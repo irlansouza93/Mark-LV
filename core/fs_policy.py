@@ -138,6 +138,10 @@ def _norm(p) -> str:
     s = os.fspath(p) if isinstance(p, os.PathLike) else str(p)
     if not s.strip() or "\0" in s:
         raise ValueError("empty or NUL path")
+    if os.name == "nt" and ":" in os.path.splitdrive(s)[1]:
+        # NTFS alternate data stream ("proj\.env:x"): the name no longer matches the deny
+        # list but the write lands in the protected file (review of spec 003).
+        raise ValueError("':' after the drive (alternate data stream)")
     try:
         return os.path.realpath(os.path.expanduser(s))
     except (OSError, ValueError) as e:
@@ -462,8 +466,11 @@ def _decide(path, op: str, actor: str) -> Decision:
                 up = fn()
                 if up and _pkey(_norm(up)) == key:
                     return Decision(True, p, op, "uploaded", actor=actor)
-            except Exception:
-                pass
+            except Exception as e:
+                # A broken UI callable must not open anything: no uploaded file, and the
+                # failure is on record instead of silent.
+                _log_failure(actor, "uploaded-file callable failed", "uploaded_callable",
+                             {"error": type(e).__name__})
 
     best = None
     for k, af in _folders():
@@ -523,8 +530,29 @@ def _sentence(d: Decision) -> str:
 
 # ── scans and containment ────────────────────────────────────────────────────
 
-def _is_link(p: str) -> bool:
+def file_url_to_path(url: str) -> str | None:
+    """Local path of a ``file:`` URL, or None when ``url`` is not one. ``file:///C:/x`` is
+    drive C: on Windows; ``file://host/share/x`` becomes the UNC path. Browsers and players
+    read these as files, so the callers run the result through require() (review 003)."""
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+    u = (url or "").strip()
+    if not u.lower().startswith("file:"):
+        return None
+    parts = urlparse(u)
+    path = url2pathname(parts.path)
+    if parts.netloc and parts.netloc.lower() != "localhost":
+        return "\\\\" + unquote(parts.netloc) + (path if path.startswith(("\\", "/")) else "\\" + path)
+    return path
+
+
+def is_link(p) -> bool:
+    """Symlink or (Windows) junction: copytree/extractors must not follow either."""
+    p = os.fspath(p)
     return os.path.islink(p) or (hasattr(os.path, "isjunction") and os.path.isjunction(p))
+
+
+_is_link = is_link
 
 
 def walk(root, *, actor: str) -> Iterator[tuple[Path, list[str], list[str]]]:

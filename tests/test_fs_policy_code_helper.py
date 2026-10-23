@@ -127,7 +127,7 @@ def test_run_in_rw_waits_for_confirmation(env):
     confirm.resolve(True)
     assert env["ev"].wait(2.0)
     assert env["runs"] and env["runs"][0][-1] == str(f)
-    assert env["got"][-1].startswith("[CONFIRMED_RESULT] Run a.py: Output:")
+    assert env["got"][-1].startswith("[CONFIRMED_RESULT] Run a.py") and "<<<" + chr(10) + "Output:" in env["got"][-1]
 
 
 def test_run_cancelled_never_runs(env):

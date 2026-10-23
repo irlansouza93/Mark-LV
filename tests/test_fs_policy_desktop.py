@@ -78,3 +78,15 @@ def test_free_task_runs_when_confirmed(env, monkeypatch):
     monkeypatch.setattr(confirm, "request",
                         lambda key, title, detail, run, report=False: run())
     assert desktop.desktop_control({"action": "task", "task": "x"}) == "ran:print(1)"
+
+
+def test_error_text_from_gemini_is_returned_not_executed(env, monkeypatch):
+    # "ERROR: unsafe" is a valid Python annotation, so the lines after it would run with
+    # no banner (review of spec 003). It must come back as text, untouched.
+    text = "ERROR: unsafe\nopen('pwned.txt', 'w').write('x')"
+    monkeypatch.setattr(desktop, "_ask_gemini_for_desktop_action", lambda t: text)
+    asked = []
+    monkeypatch.setattr(confirm, "request", lambda *a, **k: asked.append(1) or "asked")
+    out = desktop.desktop_control({"action": "task", "task": "x"})
+    assert out == text and not asked
+    assert desktop._execute_generated_code(text) == text

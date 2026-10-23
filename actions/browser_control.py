@@ -41,6 +41,20 @@ def _normalize_url(url: str) -> str:
     return "https://" + url
 
 
+def _file_url_refusal(url: str, actor: str = "browser_control") -> str:
+    """'' when ``url`` is not a file: URL or the policy lets us read that file; otherwise the
+    [FOLDER_POLICY] sentence. A file: page is read back to the model as text, so it is a
+    read of a model-chosen path like any other (review of spec 003, blocker 4)."""
+    path = fs_policy.file_url_to_path(url or "")
+    if path is None:
+        return ""
+    try:
+        fs_policy.require(path, "read", actor=actor)
+    except fs_policy.PolicyDenied as e:
+        return str(e)
+    return ""
+
+
 def _user_agent() -> str:
     if _OS == "Windows":
         return (
@@ -692,6 +706,9 @@ class _BrowserSession:
 
     async def go_to(self, url: str) -> str:
 
+        refused = _file_url_refusal(url)
+        if refused:
+            return refused
         url      = _normalize_url(url)
         page     = await self._get_page()
         prev_url = page.url
@@ -1042,6 +1059,9 @@ def browser_control(
     # opens here. The only exception: if an automation flow is already running,
     # navigation continues in that window (so multi-step tasks aren't split).
     if action in ("go_to", "search", "new_tab"):
+        refused = _file_url_refusal(params.get("url", "")) if action != "search" else ""
+        if refused:
+            return refused
         if _registry.has(browser):
             sess = _registry.get(browser)
             try:

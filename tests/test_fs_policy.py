@@ -437,3 +437,28 @@ def test_walk_gate_matches_the_per_name_rules(env):
     assert shown == expected
     assert {"keep.txt", "okay.py", ".env.example", "x.pem.bak"} <= shown
     assert not ({"ID_RSA", "k.PEM", ".ENV.local", "pw.KDBX", "a.p12", "a.key"} & shown)
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+
+@pytest.mark.skipif(sys.platform != "win32", reason="alternate data streams are NTFS only")
+def test_alternate_data_stream_is_invalid(env):
+    _folders((env["rw"], "rw"))
+    for name in (r"proj\.env:x", r"proj\a.txt:x", r"proj\a.txt:x:$DATA"):
+        d = fs_policy.check(env["rw"] / name, "write", actor="t")
+        assert not d.allowed and d.reason == "invalid", name
+    assert fs_policy.check(env["rw"] / "proj" / "a.txt", "write", actor="t").allowed
+
+
+def test_uploaded_callable_that_raises_is_recorded_and_ignored(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(errlog, "record_failure", lambda *a, **k: calls.append(k))
+    f = env["outside"] / "a.txt"
+    f.write_text("x")
+
+    def boom():
+        raise RuntimeError("ui gone")
+    fs_policy.configure(uploaded=boom)
+    d = fs_policy.check(f, "read", actor="t")
+    assert not d.allowed and d.reason == "outside"
+    assert any(c.get("error_type") == "policy:uploaded_callable" for c in calls)

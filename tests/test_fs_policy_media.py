@@ -89,3 +89,57 @@ def test_browser_screenshot_outside_is_refused_and_default_is_checked(env, monke
     ok = env["rw"] / "s.png"
     assert asyncio.run(sess.screenshot(str(ok))).startswith("Screenshot saved")
     assert ok.exists()
+
+
+# ── review fixes: file: URLs ─────────────────────────────────────────────────
+
+def test_video_file_url_outside_is_refused_and_inside_plays(env):
+    from actions import video_player as vp
+    out_f = env["outside"] / "v.mp4"
+    out_f.write_bytes(b"x")
+    in_f = env["rw"] / "v.mp4"
+    in_f.write_bytes(b"x")
+    pl = FakePlayer()
+    assert vp.video_player({"source": out_f.as_uri()}, player=pl).startswith(MARK)
+    assert pl.shown == []
+    assert vp.video_player({"source": in_f.as_uri()}, player=pl).startswith("Playing")
+    assert len(pl.shown) == 1
+
+
+def test_video_missing_outside_file_does_not_leak_existence(env):
+    from actions import video_player as vp
+    pl = FakePlayer()
+    real = env["outside"] / "real.mp4"
+    real.write_bytes(b"x")
+    a = vp.video_player({"source": str(real)}, player=pl)
+    b = vp.video_player({"source": str(env["outside"] / "nope.mp4")}, player=pl)
+    assert a.startswith(MARK) and b.startswith(MARK)
+
+
+def test_browser_file_url_is_checked_before_navigating(env, monkeypatch):
+    bc = pytest.importorskip("actions.browser_control")
+    seen = []
+    monkeypatch.setattr(bc, "_open_native", lambda url, b: seen.append(url) or f"Opened {url}")
+    monkeypatch.setattr(bc._registry, "has", lambda b=None: False)
+    secret = env["outside"] / "s.txt"
+    secret.write_text("s")
+    ok = env["rw"] / "ok.html"
+    ok.write_text("<p>")
+    for act in ("go_to", "new_tab"):
+        assert bc.browser_control({"action": act, "url": secret.as_uri()}).startswith(MARK)
+    assert seen == []
+    assert bc.browser_control({"action": "go_to", "url": ok.as_uri()}).startswith("Opened")
+    assert bc.browser_control({"action": "go_to", "url": "https://example.com"}).startswith("Opened")
+
+
+def test_browser_session_go_to_file_url_outside_is_refused(env):
+    bc = pytest.importorskip("actions.browser_control")
+    import asyncio
+    sess = object.__new__(bc._BrowserSession)
+
+    async def _get_page():
+        raise AssertionError("must refuse before touching the page")
+    sess._get_page = _get_page
+    secret = env["outside"] / "s.txt"
+    secret.write_text("s")
+    assert asyncio.run(sess.go_to(secret.as_uri())).startswith(MARK)

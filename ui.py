@@ -2782,8 +2782,11 @@ class AllowedFoldersOverlay(_HudOverlay):
                     v = Path(r.value)
                     if v != base and base in v.parents:
                         return True
-        except Exception:
-            pass
+        except Exception as e:
+            # Not fatal (the panel just skips its extra warning) but not silent either.
+            from core import errlog
+            errlog.record_failure(component="ui", name="allowed_folders._contains_protected",
+                                  exc=e, message="could not compare a folder with the deny list")
         return False
 
     def _harvest(self):
@@ -6653,6 +6656,15 @@ class MainWindow(QMainWindow):
         self._memory_overlay = ov
 
     def _open_allowed_folders(self):
+        # Clicking the button again must not stack a second panel over the first.
+        old = getattr(self, "_allowed_folders_overlay", None)
+        if old is not None:
+            try:
+                old.hide()
+                old.deleteLater()
+            except RuntimeError:         # the C++ widget is already gone: nothing to close
+                pass
+            self._allowed_folders_overlay = None
         ov = AllowedFoldersOverlay(parent=self.centralWidget())
         self._centre_overlay(ov)
         self._allowed_folders_overlay = ov

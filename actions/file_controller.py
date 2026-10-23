@@ -107,9 +107,21 @@ def _guard_inside(target: Path, op: str) -> None:
                 if fs_policy.is_denied(os.path.join(dp, n)):
                     fs_policy.require(os.path.join(dp, n), op, actor=_ACTOR)
 
-def _skip_protected(dirpath, names):
-    """copytree `ignore=`: protected items stay behind instead of being copied out."""
-    return [n for n in names if fs_policy.is_denied(os.path.join(dirpath, n))]
+def _skip_protected(dirpath, names, skipped_links=None):
+    """copytree `ignore=`: protected items stay behind instead of being copied out, and
+    so do links/junctions: copytree follows a junction (symlinks=True does not cover it on
+    Windows), which would copy in content from outside the allowed folders. Skipped links
+    are appended to `skipped_links` so the answer can name them."""
+    out = []
+    for n in names:
+        full = os.path.join(dirpath, n)
+        if fs_policy.is_denied(full):
+            out.append(n)
+        elif fs_policy.is_link(full):
+            out.append(n)
+            if skipped_links is not None:
+                skipped_links.append(n)
+    return out
 
 def _get_desktop() -> Path:
     if _OS == "Linux":
@@ -358,8 +370,10 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
 
         dst.parent.mkdir(parents=True, exist_ok=True)
 
+        skipped_links: list = []
         if src.is_dir():
-            shutil.copytree(str(src), str(dst), ignore=_skip_protected)
+            shutil.copytree(str(src), str(dst),
+                            ignore=lambda d, names: _skip_protected(d, names, skipped_links))
         else:
             shutil.copy2(str(src), str(dst))
 
@@ -375,7 +389,9 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Removed the copy in {_copy.parent.name}/."
         push_undo(f"copied {src.name} to {dst.parent.name}/", _undo_copy)
 
-        return f"Copied: {src.name} → {dst.parent.name}/"
+        note = (f" (links not followed, left out: {', '.join(skipped_links)})"
+                if skipped_links else "")
+        return f"Copied: {src.name} → {dst.parent.name}/{note}"
 
     except fs_policy.PolicyDenied as e:
         return str(e)
@@ -394,7 +410,13 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
         if not new_name:
             return "No new name provided."
 
-        new_path = target.parent / new_name
+        # A new name is a bare name: "C:\x", "..\x" or "sub/x" would move the file out
+        # of the folder the policy just approved (review of spec 003, blocker 1).
+        if (Path(new_name).name != new_name or new_name in (".", "..")
+                or os.path.splitdrive(new_name)[0] or "/" in new_name or "\\" in new_name):
+            return (f"'{new_name}' is not a bare name; rename keeps the file in its "
+                    "folder. Use move to put it somewhere else.")
+        new_path = fs_policy.require(target.parent / new_name, "write", actor=_ACTOR)
         if new_path.exists():
             return f"A file named '{new_name}' already exists here."
 
