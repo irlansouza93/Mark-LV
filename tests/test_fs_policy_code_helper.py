@@ -157,3 +157,21 @@ def test_build_in_ro_is_refused_before_anything(env):
                           "output_path": str(env["ro"] / "b.py")})
     assert out.startswith(MARK)
     assert env["model"].calls == 0 and env["runs"] == []
+
+
+def test_desktop_shortcut_resolves_to_the_real_desktop_not_the_cwd(env, monkeypatch):
+    # Found in the real test (2026-10-23): "desktop/jarvis_ola.py" was resolved against the
+    # process CWD (the app folder), so the run was refused for the wrong folder.
+    from actions import file_controller as fc
+    monkeypatch.setattr(fc, "_get_desktop", lambda: env["rw"])
+    (env["rw"] / "ola.py").write_text("print(1)")
+    out = ch.code_helper({"action": "run", "file_path": "desktop/ola.py"})
+    assert "[CONFIRMATION_PENDING]" in out
+    confirm.resolve(False)
+
+
+def test_bare_relative_file_path_is_looked_up_on_the_desktop(env):
+    (env["rw"] / "b.py").write_text("print(2)")
+    out = ch.code_helper({"action": "run", "file_path": "b.py"})
+    assert "[CONFIRMATION_PENDING]" in out
+    confirm.resolve(False)

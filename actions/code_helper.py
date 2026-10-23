@@ -558,7 +558,25 @@ Be specific and actionable. If you see an error message, quote it exactly."""
         return f"Screen analysis failed: {e}"
 
 
+def _expand_path(raw: str) -> str:
+    """'desktop/a.py' -> the real Desktop, a bare 'a.py' -> the Desktop (where this tool saves).
+
+    Found in the real test (2026-10-23): Path('desktop/jarvis_ola.py') resolved against the
+    process CWD, i.e. the app folder, so a run was refused for the wrong folder. Same
+    shortcuts as file_controller, so both tools agree on what 'desktop' means."""
+    raw = (raw or "").strip().strip('"').strip("'")
+    if not raw:
+        return raw
+    from actions.file_controller import _resolve_path
+    p = _resolve_path(raw)
+    return str(p if p.is_absolute() else DESKTOP / p)
+
+
 def code_helper(parameters: dict, response=None, player=None, session_memory=None, speak=None) -> str:
+    parameters = dict(parameters or {})
+    for key in ("file_path", "output_path"):
+        if parameters.get(key):
+            parameters[key] = _expand_path(str(parameters[key]))
     try:
         return _code_helper(parameters, response, player, session_memory, speak)
     except fs_policy.PolicyDenied as e:
