@@ -107,7 +107,7 @@ antes e visto falhando). Testes nunca leem `config/` real, rede ou interface: us
 **Independent Test**: abrir o painel, mudar a lista, conferir `config/api_keys.json` e uma decisão sem reiniciar.
 
 - [x] T025 [US4] Em `ui.py`: classe `AllowedFoldersOverlay(_HudOverlay)` no padrão de `MemoryOverlay` (`ui.py:2523`): lista das pastas com modo (combo READ ONLY / READ & WRITE), marca "missing" quando a pasta não existe, botões ADD (`QFileDialog.getExistingDirectory`), REMOVE e SAVE; SAVE chama `config_manager.save_allowed_folders` e mostra o motivo se recusado (ex.: `~/.ssh`); ao adicionar uma pasta que **contém** item negado (ex.: a pasta do usuário), mostra o aviso "protected items inside stay off limits" sem recusar; quando `get_allowed_folders` caiu no padrão por configuração corrompida, mostra o aviso no topo do painel (precisa de `allowed_folders_error() -> str | None` em `config_manager`, feito no T010); seção recolhível "Always protected" com `fs_policy.deny_rules()` (só leitura). Botão `📁  ALLOWED FOLDERS` no ⚙ SETUP junto dos outros (perto de `🧠  MEMORY`, ~`ui.py:5076`) e `_open_allowed_folders` no padrão de `_open_memory_panel` (`ui.py:6387`). Textos em inglês. Nada lento na thread Qt
-- [ ] T026 [US4] Verificar: `py_compile ui.py`; abrir o app, adicionar `C:\DESENVOLVIMENTO` em READ ONLY, salvar, conferir `allowed_folders` em `config/api_keys.json` e que `fs_policy.check` muda sem reiniciar (SC-006); tentar adicionar `~/.ssh` → motivo na tela
+- [x] T026 [US4] Verificar: `py_compile ui.py`; abrir o app, adicionar `C:\DESENVOLVIMENTO` em READ ONLY, salvar, conferir `allowed_folders` em `config/api_keys.json` e que `fs_policy.check` muda sem reiniciar (SC-006); tentar adicionar `~/.ssh` → motivo na tela
 
 ---
 
