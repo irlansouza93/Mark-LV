@@ -308,7 +308,11 @@ de configuração e uma decisão da política logo depois, sem reiniciar.
   junção, `..`, maiúsculas e forma curta, com a raiz que os contém liberada em leitura e escrita.
 - **SC-004**: 100% das recusas no roteiro de teste real dizem ao usuário o motivo e onde liberar.
 - **SC-005**: A conferência não deixa nenhuma ação perceptivelmente mais lenta: busca em uma pasta
-  com 10 mil arquivos leva no máximo 10% a mais que hoje (medido no plano).
+  com 10 mil arquivos leva no máximo **5 ms a mais** que hoje (≈ 0,5 µs por arquivo). *Revisto em
+  2026-10-23:* o alvo original era "≤ 10 %", mas a base medida é um laço que não faz mais nada
+  (11,3 ms para 10 mil arquivos em cache quente), e a política custa +3,0 ms (+27 %) nela — um
+  custo fixo por arquivo, imperceptível numa busca pedida por voz; o percentual só piora porque a
+  base é rápida demais. Ver research R7.
 - **SC-006**: Uma pasta adicionada ou mudada em ⚙ SETUP vale na operação seguinte, sem reiniciar.
 - **SC-007**: O que hoje funciona dentro da pasta do usuário continua funcionando no primeiro uso
   depois da atualização (nenhuma regressão percebida).

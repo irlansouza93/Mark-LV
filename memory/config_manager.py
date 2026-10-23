@@ -617,3 +617,98 @@ def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     plugins_cfg[plugin_name] = enabled
     data["plugins_enabled"] = plugins_cfg
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+# â”€â”€ Allowed folders (spec 003) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# The list of folders the assistant may open, and whether it may change them. Read by
+# core/fs_policy (which caches it; save_allowed_folders() tells it to reload). Shape and
+# rules: specs/003-allowed-folders/data-model.md. Never "everything open": a damaged list
+# degrades to the default (the user's folder), and an unknown mode degrades to read-only.
+
+_allowed_error: str | None = None
+
+
+def _default_allowed_folders() -> list[dict]:
+    return [{"path": str(Path.home()), "mode": "rw"}]
+
+
+def _fail_allowed(message: str) -> None:
+    try:
+        from core import errlog
+        errlog.record_failure(component="config", name="allowed_folders",
+                              error_type="config:allowed_folders", message=message)
+    except Exception:
+        pass
+
+
+def _clean_allowed_folders(raw) -> tuple[list[dict], bool]:
+    """Normalise a raw list: (clean items, whether anything had to be thrown away)."""
+    import os
+    out: dict[str, dict] = {}
+    dropped = False
+    for it in raw:
+        p = it.get("path") if isinstance(it, dict) else None
+        if not isinstance(p, str) or not p.strip() or "\0" in p:
+            _fail_allowed(f"dropped an invalid allowed_folders item: {str(it)[:80]}")
+            dropped = True
+            continue
+        mode = it.get("mode")
+        if mode not in ("ro", "rw"):
+            _fail_allowed(f"unknown mode {str(mode)[:20]!r} for a folder: using read-only")
+            mode = "ro"
+        try:
+            norm = os.path.realpath(os.path.expanduser(p))
+        except (OSError, ValueError):
+            _fail_allowed("dropped an allowed_folders item with an unusable path")
+            dropped = True
+            continue
+        item = {"path": norm, "mode": mode}
+        if isinstance(it.get("label"), str) and it["label"].strip():
+            item["label"] = it["label"].strip()
+        key = os.path.normcase(norm)
+        if key in out:                      # duplicate: the last mode wins, the first slot stays
+            out[key] = {**out[key], **item}
+        else:
+            out[key] = item
+    return list(out.values()), dropped
+
+
+def get_allowed_folders() -> list[dict]:
+    """The folders the assistant may open: [{"path", "mode": "ro"|"rw", "label"?}]."""
+    global _allowed_error
+    _allowed_error = None
+    data = load_api_keys()
+    if "allowed_folders" not in data:
+        return _default_allowed_folders()       # not written: a future default reaches everyone
+    raw = data["allowed_folders"]
+    if not isinstance(raw, list):
+        _allowed_error = "allowed_folders in api_keys.json is damaged; using your user folder."
+        _fail_allowed("allowed_folders is not a list")
+        return _default_allowed_folders()
+    clean, _dropped = _clean_allowed_folders(raw)
+    if not clean:
+        if raw:
+            _allowed_error = "allowed_folders in api_keys.json is damaged; using your user folder."
+        return _default_allowed_folders()
+    return clean
+
+
+def allowed_folders_error() -> str | None:
+    """Set when the last read fell back to the default because the stored list was damaged."""
+    return _allowed_error
+
+
+def save_allowed_folders(items: list[dict]) -> str | None:
+    """Store the list. Returns the reason it was refused, or None when saved."""
+    global _allowed_error
+    from core import fs_policy
+    clean, _dropped = _clean_allowed_folders(items if isinstance(items, list) else [])
+    if not clean:
+        return "Add at least one folder."
+    for it in clean:
+        why = fs_policy.validate_folder(it["path"])
+        if why:
+            return f'{it["path"]}: {why}'
+    _patch_config(allowed_folders=clean)
+    _allowed_error = None
+    fs_policy.reload()
+    return None

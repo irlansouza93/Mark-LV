@@ -80,6 +80,7 @@ from core                     import live_session as _live
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
+from core                      import fs_policy
 from core                      import audio_devices
 from core                      import errlog
 from core                      import llm_usage
@@ -1232,6 +1233,20 @@ class JarvisLive:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
         self._wait_call_soon("user_text")    # a typed request opens the wait episode (spec 002)
+        asyncio.run_coroutine_threadsafe(
+            self.session.send_client_content(
+                turns={"role": "user", "parts": [{"text": text}]},
+                turn_complete=True
+            ),
+            self._loop
+        )
+
+    def _deliver_to_model(self, text: str):
+        """Confirmation outcome (confirm.request report=True) -> the model, the
+        same way a typed command goes. No session: just show it in the log."""
+        if not self._loop or not self.session:
+            self.ui.write_log(f"SYS: {text}")
+            return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -2673,7 +2688,10 @@ class JarvisLive:
             show = self.ui.show_confirm,
             hide = self.ui.hide_confirm,
             log  = self.ui.write_log,
+            deliver = self._deliver_to_model,
         )
+        # A file the user dropped on the HUD may be read wherever it lives (spec 003, FR-011).
+        fs_policy.bind_uploaded(lambda: self.ui.current_file)
         set_trim_notifier(self.ui.write_log)
         errlog.bind(notify=self.ui.write_log, transcript=lambda: list(self._session_log[-6:]))
         asyncio.get_running_loop().set_exception_handler(errlog.asyncio_exception_handler)
@@ -2978,4 +2996,4 @@ def main():
     ui.root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    main()

@@ -15,7 +15,7 @@ mesmo caso.
 ## 2. Medida de desempenho (SC-005)
 
 `tools/fs_policy_bench.py` cria 10 mil arquivos numa pasta temporária e mede a busca do
-`file_controller` com e sem a política (5 rodadas, mediana). Esperado: ≤ 10 % a mais. O número
+`file_controller` com e sem a política (5 rodadas, mediana). Esperado: ≤ 5 ms a mais (medido em 2026-10-23: 14,3 × 11,3 ms, +3,0 ms). O número
 vai para o PR e para o comentário do porquê em `fs_policy.walk`.
 
 ## 3. Interface (⚙ SETUP → ALLOWED FOLDERS)

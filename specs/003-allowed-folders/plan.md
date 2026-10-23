@@ -25,7 +25,7 @@ ALLOWED FOLDERS. Decisões técnicas em [research.md](research.md); API em
 `config/` real ou interface
 **Target Platform**: Windows 11 (máquina do Irlan), macOS, Linux
 **Project Type**: app de desktop (um processo)
-**Performance Goals**: busca em 10 mil arquivos ≤ 10 % mais lenta (SC-005, R7); `check()` de um
+**Performance Goals**: busca em 10 mil arquivos ≤ 5 ms mais lenta (SC-005 revisto em 2026-10-23, R7); `check()` de um
 caminho < 1 ms (um `realpath`)
 **Constraints**: nada novo na thread Qt além do painel (o seletor de pasta é o `QFileDialog` que a
 UI já usa); declarações das ferramentas +≈44 caracteres (R10); diff pequeno nos arquivos do
