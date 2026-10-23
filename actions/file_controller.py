@@ -761,7 +761,7 @@ TOOL = {
             },
             "path": {
                 "type": "STRING",
-                "description": "File/folder path or shortcut: desktop, downloads, documents, home"
+                "description": "File/folder path or shortcut: desktop, downloads, documents, home (allowed folders only)"
             },
             "destination": {
                 "type": "STRING",

@@ -44,6 +44,7 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
 | `core/voice_preview.py` | Amostras de voz para o seletor (TTS do Gemini, cache em `config/voice_cache/`) |
 | `core/errlog.py` | Registro em `logs/`: uma thread de escrita recebe dicts por fila (quem chama gasta ~1 µs). `jarvis.log` (console, via tee de stdout/stderr), `failures.jsonl` (assinatura, agrupamento, falha "mole", limite de rajada), `reports.jsonl` (relatos), `usage-*.jsonl`. `setup()`/`bind()` ligados no `main.py`; ganchos `record_failure`/`note_tool` nos loaders, em `core/gemini.py` e no `main.py` |
 | `core/redact.py` | Filtro de segredos aplicado a **todo** registro antes de ir ao disco (chaves de `api_keys.json`, formatos conhecidos, campos por nome) |
+| `core/fs_policy.py` | Política central de pastas liberadas: `require(path, op, actor=)` antes de tocar disco, lista de negação fixa, `walk`/`confined`; lista salva em `allowed_folders` de `config/api_keys.json` |
 | `core/llm_usage.py` | Uso de LLM e custo: tokens por modalidade, preço por tabela, medidor dos turnos de voz, resumo (`summarize`). `live_message(response)` roda em toda mensagem do Live — só lê atributos e enfileira |
 | `core/wait_cue.py` | Rede de segurança do silêncio (spec 002): `WaitWatchdog` puro (relógio injetável) decide HUD "pensando", frase de espera e desistência a partir do fim da fala; frases na voz do JARVIS em cache (`config/voice_cache/wait_*`), tom de reserva. Ganchos no `main.py` (`_wait_cue_loop`, `_wait_call`) |
 | `config/llm_prices.json` | Tabela de preços (US$/1M tokens, datada, com fonte); editar não exige código |
@@ -67,6 +68,7 @@ O Mark LV é **independente do Mark LVI** (`C:\DESENVOLVIMENTO\JARVIS\Mark-LVI`)
 
 ## Armadilhas conhecidas
 - **`.gitignore` não aceita comentário no fim da linha** — `padrão  # nota` vira um padrão literal que não casa com nada. Comentários sempre em linha própria (foi assim que a chave da API e a chave TLS deixaram de ser ignoradas).
+- Todo caminho escolhido pelo modelo passa por `fs_policy.require` (nunca regra local nem `Path(...)` direto); rodar código escrito pelo modelo passa por `confirm.request(..., report=True)`.
 - Segredos que nunca entram no git: `config/api_keys.json`, `config/certs/`, `config/whatsapp_web/`, `memory/long_term.json`. Antes de commitar, confira `git status`.
 - Webcam no Windows: se nada abre, primeiro olhar Configurações → Privacidade → Câmera (`actions/screen_processor.camera_problem()` diagnostica). A câmera tem **um único dono**: o stream da UI (`MainWindow._cam_loop`); quem precisar de quadro usa `ui.camera_frame()`, nunca abre a câmera de novo.
 - O modelo Live **não** está na escada de `core/gemini.py` (modelos Live não são intercambiáveis); a voz é fixada na conexão — trocar voz reconstrói a sessão.

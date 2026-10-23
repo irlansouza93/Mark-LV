@@ -113,10 +113,10 @@ antes e visto falhando). Testes nunca leem `config/` real, rede ou interface: us
 
 ## Phase 7: Polish & Cross-Cutting
 
-- [ ] T027 [P] Descrições das ferramentas (R10): `file_controller` parâmetro `path` e `code_helper` parâmetro `file_path` ganham " (allowed folders only)"; registrar no PR o total de caracteres somados (≈ +44)
-- [ ] T028 [P] `CHANGELOG.md` (Unreleased: spec 003), `CLAUDE.md` (linha `core/fs_policy.py` no mapa do código; armadilha "todo caminho escolhido pelo modelo passa por `fs_policy.require`; `config/api_keys.json` guarda `allowed_folders`"), `docs/demandas.md` §2 (estado: implementado na spec 003), `docs/VISAO.md` §6 se surgir algo em aberto
-- [ ] T029 Rodar a skill `lv-validate`: `py_compile` em tudo que mudou, `pytest tests -q`, `tools/fs_policy_bench.py` (número no PR), `git diff --stat` conferindo CRLF nos arquivos do upstream
-- [ ] T030 `graphify update .`
+- [x] T027 [P] Descrições das ferramentas (R10): `file_controller` parâmetro `path` e `code_helper` parâmetro `file_path` ganham " (allowed folders only)"; registrar no PR o total de caracteres somados (≈ +44)
+- [x] T028 [P] `CHANGELOG.md` (Unreleased: spec 003), `CLAUDE.md` (linha `core/fs_policy.py` no mapa do código; armadilha "todo caminho escolhido pelo modelo passa por `fs_policy.require`; `config/api_keys.json` guarda `allowed_folders`"), `docs/demandas.md` §2 (estado: implementado na spec 003), `docs/VISAO.md` §6 se surgir algo em aberto
+- [x] T029 Rodar a skill `lv-validate`: `py_compile` em tudo que mudou, `pytest tests -q`, `tools/fs_policy_bench.py` (número no PR), `git diff --stat` conferindo CRLF nos arquivos do upstream
+- [x] T030 `graphify update .`
 - [ ] T031 Revisão independente com `lv-reviewer` (diff × constituição × spec × armadilhas)
 - [ ] T032 Teste real: roteiro único da spec (passos 1–7 e 4b) com a chave, fora do sandbox; resultado de cada passo e as linhas `kind: "policy"` de `logs/failures.jsonl` vão para o PR
 

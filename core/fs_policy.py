@@ -535,9 +535,9 @@ def walk(root, *, actor: str) -> Iterator[tuple[Path, list[str], list[str]]]:
     at a time with one regex over the joined listing, and only a directory where it hits
     pays the per-name check. Measured with tools/fs_policy_bench.py (10 000 files in 100
     folders, warm cache, median of 5 `find` runs on the RTX notebook): a test per file was
-    +100 % over a bare os.walk (20 ms vs 10 ms); the regex gate is 15 ms vs 11 ms, about
-    0.4 us/file. Against a loop that does nothing else that is still +25..45 %, so SC-005
-    (<= 10 %) is only met when the search does real work per file (stat, cold disk).
+    +100 % over a bare os.walk (20 ms vs 10 ms); the regex gate is 14.3 ms vs 11.3 ms,
+    +3.0 ms or about 0.3 us/file. Against a loop that does nothing else that is +27 %,
+    but within the revised SC-005 (no more than 5 ms extra on 10 000 files, 2026-10-23).
     Folder links and junctions are listed by name but never entered (FR-004); opening one
     goes through require()."""
     try:

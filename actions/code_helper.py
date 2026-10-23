@@ -653,7 +653,7 @@ TOOL = {
             },
             "file_path": {
                 "type": "STRING",
-                "description": "Path to existing file for edit/explain/run/build"
+                "description": "Path to existing file for edit/explain/run/build (allowed folders only)"
             },
             "code": {
                 "type": "STRING",
