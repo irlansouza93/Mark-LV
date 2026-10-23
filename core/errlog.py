@@ -1102,6 +1102,10 @@ def _kind_for(component, error_type) -> str:
         return "gemini"
     if component == "live":
         return "live"
+    # A refusal by the folder policy is the app working as designed, not a bug: its own kind
+    # lets lv-triage tell "JARVIS said no" from "something broke" (spec 003, research R4).
+    if component == "fs_policy":
+        return "policy"
     if isinstance(error_type, str) and error_type.startswith("soft:"):
         return "soft"
     return "exception"

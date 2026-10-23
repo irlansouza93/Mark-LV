@@ -29,6 +29,8 @@ import threading
 import webbrowser
 from pathlib import Path
 
+from core import fs_policy
+
 _YT = re.compile(r"(youtube\.com/|youtu\.be/)", re.I)
 
 # Which open request is the current one. Opening happens on a thread now, so
@@ -52,20 +54,37 @@ def _still_wanted(token: int) -> bool:
 
 
 def _is_url(text: str) -> bool:
-    return text.lower().startswith(("http://", "https://", "file://"))
+    return text.lower().startswith(("http://", "https://"))
+
+
+_VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv", ".mpg", ".mpeg", ".mp3", ".wav")
 
 
 def _local_path(text: str) -> str:
-    """The text as an existing file on disk, or ''."""
+    """The text as an existing file on disk, or ''. Raises fs_policy.PolicyDenied.
+
+    The policy runs BEFORE exists(): asking for a file outside the allowed folders must
+    answer the same whether or not it is there, or the answer leaks which files exist.
+    Plain words ("play the new Dune trailer") are not paths and skip the policy; a
+    file:// URL is a path too, not a web URL (review of spec 003, blocker 4)."""
     raw = (text or "").strip().strip('"').strip("'")
     if not raw:
         return ""
+    from_url = fs_policy.file_url_to_path(raw)
+    if from_url is None and raw.lower().startswith(("http://", "https://")):
+        return ""
+    if from_url is not None:
+        raw = from_url
+    elif not (Path(raw).is_absolute() or raw.startswith("~") or "/" in raw or "\\" in raw
+              or raw.lower().endswith(_VIDEO_EXT)):
+        return ""
     try:
         p = Path(raw).expanduser()
-        if p.exists() and p.is_file():
-            return str(p)
     except Exception:
-        pass
+        return ""
+    checked = fs_policy.require(p, "read", actor="video_player")
+    if checked.is_file():
+        return str(checked)
     return ""
 
 
@@ -199,8 +218,17 @@ def video_player(parameters: dict = None, response=None, player=None,
     if not source:
         return "What should I play?"
 
-    local = _local_path(source)
+    try:
+        local = _local_path(source)
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     if local:
+        # A local file is a path the model chose: same read check as every other action
+        # (spec 003). URLs never reach this branch, so they skip the policy.
+        try:
+            local = str(fs_policy.require(local, "read", actor="video_player"))
+        except fs_policy.PolicyDenied as e:
+            return str(e)
         player.show_video(local, Path(local).name, muted=True)
         return f"Playing {Path(local).name} on the display, muted."
 

@@ -13,6 +13,8 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
+from core import fs_policy, user_dirs
+
 from playwright.async_api import (
     async_playwright,
     BrowserContext,
@@ -37,6 +39,20 @@ def _normalize_url(url: str) -> str:
     if "." not in url:
         url = url + ".com"
     return "https://" + url
+
+
+def _file_url_refusal(url: str, actor: str = "browser_control") -> str:
+    """'' when ``url`` is not a file: URL or the policy lets us read that file; otherwise the
+    [FOLDER_POLICY] sentence. A file: page is read back to the model as text, so it is a
+    read of a model-chosen path like any other (review of spec 003, blocker 4)."""
+    path = fs_policy.file_url_to_path(url or "")
+    if path is None:
+        return ""
+    try:
+        fs_policy.require(path, "read", actor=actor)
+    except fs_policy.PolicyDenied as e:
+        return str(e)
+    return ""
 
 
 def _user_agent() -> str:
@@ -690,6 +706,9 @@ class _BrowserSession:
 
     async def go_to(self, url: str) -> str:
 
+        refused = _file_url_refusal(url)
+        if refused:
+            return refused
         url      = _normalize_url(url)
         page     = await self._get_page()
         prev_url = page.url
@@ -870,9 +889,13 @@ class _BrowserSession:
     async def screenshot(self, path: str = None) -> str:
         page = await self._get_page()
         try:
-            save_path = path or str(Path.home() / "Desktop" / "jarvis_screenshot.png")
+            save_path = str(fs_policy.require(
+                path or str(user_dirs.desktop() / "jarvis_screenshot.png"),
+                "write", actor="browser_control"))
             await page.screenshot(path=save_path, full_page=False)
             return f"Screenshot saved: {save_path}"
+        except fs_policy.PolicyDenied as e:
+            return str(e)
         except Exception as e:
             return f"Screenshot error: {e}"
 
@@ -1036,6 +1059,9 @@ def browser_control(
     # opens here. The only exception: if an automation flow is already running,
     # navigation continues in that window (so multi-step tasks aren't split).
     if action in ("go_to", "search", "new_tab"):
+        refused = _file_url_refusal(params.get("url", "")) if action != "search" else ""
+        if refused:
+            return refused
         if _registry.has(browser):
             sess = _registry.get(browser)
             try:

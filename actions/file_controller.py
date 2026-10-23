@@ -11,6 +11,7 @@ except ImportError:
     _SEND2TRASH = False
 
 from core.undo import push_undo
+from core import fs_policy, user_dirs
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
@@ -90,62 +91,55 @@ def _restore_from_trash(original: Path) -> str:
             f"automatically, but it is there and can be restored by hand.")
 
 
-_SAFE_ROOTS: list[Path] = [
-    Path.home(),
-]
+_ACTOR = "file_controller"
 
 def _is_safe_path(target: Path) -> bool:
-    """Is the given path inside _SAFE_ROOTS? If not, reject the operation."""
-    try:
-        resolved = target.resolve()
-        return any(
-            resolved == root.resolve() or resolved.is_relative_to(root.resolve())
-            for root in _SAFE_ROOTS
-        )
-    except Exception:
-        return False
+    """Kept as a one-line delegate: the rule lives in core/fs_policy (spec 003)."""
+    return fs_policy.check(target, "read", actor=_ACTOR).allowed
+
+def _guard_inside(target: Path, op: str) -> None:
+    """A folder carries what is inside it: moving, renaming or deleting one that holds a
+    protected item (a key, a vault, .git) would take that item with it. Raises
+    PolicyDenied naming the first such item. Only folders pay the scan."""
+    if target.is_dir():
+        for dp, dirs, files in os.walk(target):
+            for n in dirs + files:
+                if fs_policy.is_denied(os.path.join(dp, n)):
+                    fs_policy.require(os.path.join(dp, n), op, actor=_ACTOR)
+
+def _skip_protected(dirpath, names, skipped_links=None):
+    """copytree `ignore=`: protected items stay behind instead of being copied out, and
+    so do links/junctions: copytree follows a junction (symlinks=True does not cover it on
+    Windows), which would copy in content from outside the allowed folders. Skipped links
+    are appended to `skipped_links` so the answer can name them."""
+    out = []
+    for n in names:
+        full = os.path.join(dirpath, n)
+        if fs_policy.is_denied(full):
+            out.append(n)
+        elif fs_policy.is_link(full):
+            out.append(n)
+            if skipped_links is not None:
+                skipped_links.append(n)
+    return out
 
 def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Desktop"
+    return user_dirs.desktop()
 
 def _get_downloads() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOWNLOAD_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Downloads"
+    return user_dirs.downloads()
 
 def _get_documents() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOCUMENTS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Documents"
+    return user_dirs.documents()
 
 def _get_pictures() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_PICTURES_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Pictures"
+    return user_dirs.pictures()
 
 def _get_music() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_MUSIC_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Music"
+    return user_dirs.music()
 
 def _get_videos() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_VIDEOS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Videos"
+    return user_dirs.videos()
 
 
 def _resolve_path(raw: str) -> Path:
@@ -198,8 +192,7 @@ def _safe_trash(target: Path) -> str:
 def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
     try:
         target = _resolve_path(path)
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "read", actor=_ACTOR)
         if not target.exists():
             return f"Path not found: {target}"
         if not target.is_dir():
@@ -208,6 +201,8 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
         items = []
         for item in sorted(target.iterdir()):
             if not show_hidden and item.name.startswith("."):
+                continue
+            if fs_policy.is_denied(item):
                 continue
             if item.is_dir():
                 items.append(f"📁 {item.name}/")
@@ -220,6 +215,8 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
 
         return f"Contents of {target.name}/ ({len(items)} items):\n" + "\n".join(items)
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except PermissionError:
         return f"Permission denied: {path}"
     except Exception as e:
@@ -230,8 +227,7 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "write", actor=_ACTOR)
         target.parent.mkdir(parents=True, exist_ok=True)
         existed = target.exists()
         previous = None
@@ -244,6 +240,8 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
         push_undo(f"created {target.name}",
                   _undo_write(target, previous) if existed else _undo_create(target))
         return f"File created: {target.name}"
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not create file: {e}"
 
@@ -252,8 +250,7 @@ def create_folder(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "write", actor=_ACTOR)
         already = target.exists()
         target.mkdir(parents=True, exist_ok=True)
         # Only offer to undo a folder we actually made. "mkdir -p" on something
@@ -262,6 +259,8 @@ def create_folder(path: str, name: str = "") -> str:
         if not already:
             push_undo(f"created folder {target.name}", _undo_create(target))
         return f"Folder created: {target.name}"
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not create folder: {e}"
 
@@ -270,10 +269,10 @@ def delete_file(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "write", actor=_ACTOR)
         if not target.exists():
             return f"Not found: {target.name}"
+        _guard_inside(target, "write")
 
         # Safe-directory check — protect critical user folders
         protected = {
@@ -290,6 +289,8 @@ def delete_file(path: str, name: str = "") -> str:
                       lambda p=original: _restore_from_trash(p))
         return result
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except PermissionError:
         return f"Permission denied: {path}"
     except Exception as e:
@@ -302,14 +303,14 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
         src    = (base / name) if name else base
         dst    = _resolve_path(destination) if destination else None
 
+        # Policy first: "not found" must not tell what exists outside the allowed folders.
+        src = fs_policy.require(src, "write", actor=_ACTOR)
         if not src.exists():
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
-        if not _is_safe_path(src):
-            return f"Access denied (source): {src}"
-        if not _is_safe_path(dst):
-            return f"Access denied (destination): {dst}"
+        dst = fs_policy.require(dst, "write", actor=_ACTOR)
+        _guard_inside(src, "write")
 
         if dst.is_dir():
             dst = dst / src.name
@@ -321,6 +322,8 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
                   _undo_move(origin, dst.resolve()))
         return f"Moved: {src.name} → {dst.parent.name}/"
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not move: {e}"
 
@@ -331,22 +334,22 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
         src  = (base / name) if name else base
         dst  = _resolve_path(destination) if destination else None
 
+        src = fs_policy.require(src, "read", actor=_ACTOR)
         if not src.exists():
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
-        if not _is_safe_path(src):
-            return f"Access denied (source): {src}"
-        if not _is_safe_path(dst):
-            return f"Access denied (destination): {dst}"
+        dst = fs_policy.require(dst, "write", actor=_ACTOR)
 
         if dst.is_dir():
             dst = dst / src.name
 
         dst.parent.mkdir(parents=True, exist_ok=True)
 
+        skipped_links: list = []
         if src.is_dir():
-            shutil.copytree(str(src), str(dst))
+            shutil.copytree(str(src), str(dst),
+                            ignore=lambda d, names: _skip_protected(d, names, skipped_links))
         else:
             shutil.copy2(str(src), str(dst))
 
@@ -362,8 +365,12 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Removed the copy in {_copy.parent.name}/."
         push_undo(f"copied {src.name} to {dst.parent.name}/", _undo_copy)
 
-        return f"Copied: {src.name} → {dst.parent.name}/"
+        note = (f" (links not followed, left out: {', '.join(skipped_links)})"
+                if skipped_links else "")
+        return f"Copied: {src.name} → {dst.parent.name}/{note}"
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not copy: {e}"
 
@@ -372,14 +379,20 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
     try:
         base     = _resolve_path(path)
         target   = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "write", actor=_ACTOR)
         if not target.exists():
             return f"Not found: {target.name}"
+        _guard_inside(target, "write")
         if not new_name:
             return "No new name provided."
 
-        new_path = target.parent / new_name
+        # A new name is a bare name: "C:\x", "..\x" or "sub/x" would move the file out
+        # of the folder the policy just approved (review of spec 003, blocker 1).
+        if (Path(new_name).name != new_name or new_name in (".", "..")
+                or os.path.splitdrive(new_name)[0] or "/" in new_name or "\\" in new_name):
+            return (f"'{new_name}' is not a bare name; rename keeps the file in its "
+                    "folder. Use move to put it somewhere else.")
+        new_path = fs_policy.require(target.parent / new_name, "write", actor=_ACTOR)
         if new_path.exists():
             return f"A file named '{new_name}' already exists here."
 
@@ -389,6 +402,8 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
                   _undo_move(old_path, new_path.resolve()))
         return f"Renamed: {target.name} → {new_name}"
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not rename: {e}"
 
@@ -397,8 +412,7 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "read", actor=_ACTOR)
         if not target.exists():
             return f"File not found: {target.name}"
         if not target.is_file():
@@ -409,6 +423,8 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
             content = content[:max_chars] + f"\n\n[Truncated — {len(content)} total chars]"
         return content
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not read file: {e}"
 
@@ -418,8 +434,7 @@ def write_file(path: str, name: str = "", content: str = "",
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "write", actor=_ACTOR)
         target.parent.mkdir(parents=True, exist_ok=True)
 
         # Snapshot before writing. None means "did not exist", which is a
@@ -446,6 +461,8 @@ def write_file(path: str, name: str = "", content: str = "",
         return (f"{action}: {target.name}. "
                 f"(Too large to keep a copy of the old contents, so this one "
                 f"cannot be undone.)")
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not write file: {e}"
 
@@ -454,8 +471,7 @@ def find_files(name: str = "", extension: str = "",
                path: str = "home", max_results: int = 20) -> str:
     try:
         search_path = _resolve_path(path)
-        if not _is_safe_path(search_path):
-            return f"Access denied: {search_path}"
+        search_path = fs_policy.require(search_path, "read", actor=_ACTOR)
         if not search_path.exists():
             return f"Search path not found: {path}"
 
@@ -463,21 +479,23 @@ def find_files(name: str = "", extension: str = "",
         dir_count  = 0
         max_dirs   = 500  # performance + safety limit
 
-        for item in search_path.rglob("*"):
-            if item.is_dir():
-                dir_count += 1
-                if dir_count > max_dirs:
+        done = False
+        for dp, dirs, files in fs_policy.walk(search_path, actor=_ACTOR):
+            for fn in files:
+                if extension and os.path.splitext(fn)[1].lower() != extension.lower():
+                    continue
+                if name and name.lower() not in fn.lower():
+                    continue
+                try:
+                    size = _format_size((dp / fn).stat().st_size)
+                except OSError:
+                    continue
+                results.append(f"📄 {fn} ({size}) — {dp}")
+                if len(results) >= max_results:
+                    done = True
                     break
-                continue
-            if not item.is_file():
-                continue
-            if extension and item.suffix.lower() != extension.lower():
-                continue
-            if name and name.lower() not in item.name.lower():
-                continue
-            size = _format_size(item.stat().st_size)
-            results.append(f"📄 {item.name} ({size}) — {item.parent}")
-            if len(results) >= max_results:
+            dir_count += len(dirs)
+            if done or dir_count > max_dirs:
                 break
 
         if not results:
@@ -486,6 +504,8 @@ def find_files(name: str = "", extension: str = "",
 
         return f"Found {len(results)} file(s):\n" + "\n".join(results)
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Search error: {e}"
 
@@ -494,14 +514,14 @@ def get_largest_files(path: str = "downloads", count: int = 10) -> str:
     count = min(count, 50)  # maksimum 50
     try:
         search_path = _resolve_path(path)
-        if not _is_safe_path(search_path):
-            return f"Access denied: {search_path}"
+        search_path = fs_policy.require(search_path, "read", actor=_ACTOR)
         if not search_path.exists():
             return f"Path not found: {path}"
 
         files = []
-        for item in search_path.rglob("*"):
-            if item.is_file():
+        for dp, _dirs, names in fs_policy.walk(search_path, actor=_ACTOR):
+            for fn in names:
+                item = dp / fn
                 try:
                     files.append((item.stat().st_size, item))
                 except Exception:
@@ -519,6 +539,8 @@ def get_largest_files(path: str = "downloads", count: int = 10) -> str:
 
         return "\n".join(lines)
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Error: {e}"
 
@@ -550,14 +572,14 @@ def organize_desktop() -> str:
                       ".cpp", ".java", ".cs", ".go", ".rs", ".sh"},
     }
 
-    desktop = _get_desktop()
     moved, skipped = [], []
     journal: list[tuple[Path, Path]] = []   # (where it was, where it went)
 
     try:
+        desktop = fs_policy.require(_get_desktop(), "write", actor=_ACTOR)
         for item in desktop.iterdir():
             # Leave folders, hidden files and organize-folders untouched
-            if item.is_dir() or item.name.startswith("."):
+            if item.is_dir() or item.name.startswith(".") or fs_policy.is_denied(item):
                 continue
             if item.name in {k for k in type_map}:
                 continue
@@ -617,6 +639,8 @@ def organize_desktop() -> str:
             result += f"\n{len(skipped)} file(s) skipped (name conflict)."
         return result
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not organize desktop: {e}"
 
@@ -625,8 +649,7 @@ def get_file_info(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
+        target = fs_policy.require(target, "read", actor=_ACTOR)
         if not target.exists():
             return f"Not found: {target.name}"
 
@@ -642,6 +665,8 @@ def get_file_info(path: str, name: str = "") -> str:
         }
         return "\n".join(f"  {k}: {v}" for k, v in info.items())
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         return f"Could not get file info: {e}"
 
@@ -734,7 +759,7 @@ TOOL = {
             },
             "path": {
                 "type": "STRING",
-                "description": "File/folder path or shortcut: desktop, downloads, documents, home"
+                "description": "File/folder path or shortcut: desktop, downloads, documents, home (allowed folders only)"
             },
             "destination": {
                 "type": "STRING",

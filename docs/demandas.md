@@ -67,6 +67,8 @@ de cada uma (só leitura / leitura e escrita), editável em ⚙ SETUP, e uma lis
 (`config/api_keys.json`, `.ssh`, cofres de senha, `.git/` interno). Todas as ações que tocam disco
 passam por ele. Testável por `pytest` sem interface.
 
+**Estado (2026-10-23).** Implementado na spec 003 (`specs/003-allowed-folders/`): `core/fs_policy.py` centraliza as pastas liberadas (só leitura ou leitura e escrita, editáveis em ⚙ SETUP → ALLOWED FOLDERS) e a lista de negação fixa; todas as ações que tocam disco passam por ele, e código escrito pelo modelo só roda com confirmação na tela.
+
 ## 3. Entrar em projetos, ler, auditar e sugerir melhorias
 
 **Hoje.** `code_helper` escreve, edita, explica e roda **um arquivo**; `dev_agent` cria projetos

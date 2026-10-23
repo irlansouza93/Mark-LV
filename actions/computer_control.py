@@ -15,6 +15,8 @@ import time
 import random
 from pathlib import Path
 
+from core import fs_policy, user_dirs
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -62,7 +64,7 @@ _SAFE_SCREENSHOT_ROOTS = (
 )
 
 def _safe_screenshot_path(requested: str | None) -> Path:
-    fallback = Path.home() / "Desktop" / "jarvis_screenshot.png"
+    fallback = user_dirs.desktop() / "jarvis_screenshot.png"
     if not requested:
         return fallback
     try:
@@ -241,7 +243,11 @@ def _clipboard_paste(text: str) -> str:
 
 def _screenshot(save_path: str | None = None) -> str:
     _require_pyautogui()
-    path = _safe_screenshot_path(save_path)
+    # The home-dir clamp above stays; the policy decides the folder, also for the default path.
+    try:
+        path = fs_policy.require(_safe_screenshot_path(save_path), "write", actor="computer_control")
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     img  = pyautogui.screenshot()
     img.save(str(path))
     return f"Screenshot saved: {path}"
