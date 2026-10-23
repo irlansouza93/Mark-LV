@@ -657,6 +657,8 @@ class JarvisLive:
         self._go_away_event: asyncio.Event | None = None
         self._session_t0       = 0.0
         self._last_end_reason  = ""                   # how the previous connection ended
+        self._test_go_away_done = False               # JARVIS_TEST_GOAWAY fires once
+        self._test_go_away_on_tool: float | None = None
         self._last_model_audio = 0.0                  # monotonic, last model audio chunk
         self._results    = _live.ResultMailbox()      # tool results still owed to the model
         self._tool_tasks: set[asyncio.Task] = set()   # detached tool runs (strong refs)
@@ -1066,6 +1068,27 @@ class JarvisLive:
         self.ui.write_log("SYS: Session time limit — renewing the connection...")
         raise _ReconnectSignal(keep_context=True, end_reason="go_away")
 
+    async def _test_go_away(self, spec: str) -> None:
+        """Dev hook: JARVIS_TEST_GOAWAY="AFTER,LEFT" (seconds, default LEFT=20)
+        feeds this connection a fake GoAway AFTER seconds in, once per process,
+        so the renewal path can be tried in a minute instead of waiting for the
+        real ~10 min cap. Same path as the server's notice from _on_go_away on.
+        AFTER may be "tool": the notice then arrives as the next tool starts —
+        the case that lost a web_search result on 2026-10-19."""
+        after, _, left = spec.partition(",")
+        try:
+            left = float(left or 20)
+            after = None if after.strip() == "tool" else float(after)
+        except ValueError:
+            print(f"[JARVIS] JARVIS_TEST_GOAWAY={spec!r} ignored (expected AFTER|tool,LEFT)")
+            return
+        if after is None:
+            self._test_go_away_on_tool = left
+            return
+        await asyncio.sleep(after)
+        print("[JARVIS] 🧪 Test GoAway injected")
+        self._on_go_away(types.LiveServerGoAway(time_left=f"{left:g}s"))
+
     def _spawn(self, coro) -> None:
         """create_task with a strong reference: the loop keeps only a weak one."""
         task = asyncio.create_task(coro)
@@ -1083,6 +1106,10 @@ class JarvisLive:
         w = self._wait          # this connection's watchdog (spec 002 is per session)
         for _ in tool_call.function_calls:
             self._wait_call("tool_started")      # a running tool is not a stalled model
+        if self._test_go_away_on_tool is not None:   # dev hook, see _test_go_away
+            left, self._test_go_away_on_tool = self._test_go_away_on_tool, None
+            print("[JARVIS] 🧪 Test GoAway injected (tool started)")
+            self._on_go_away(types.LiveServerGoAway(time_left=f"{left:g}s"))
         task = asyncio.create_task(self._run_tool_call(self.session, w, tool_call))
         self._tool_tasks.add(task)          # the loop keeps only a weak reference
         task.add_done_callback(self._tool_tasks.discard)
@@ -2763,6 +2790,11 @@ class JarvisLive:
                     self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self._watch_reconnect())
                     tg.create_task(self._watch_go_away())
+                    import os as _os
+                    _test_ga = _os.environ.get("JARVIS_TEST_GOAWAY")
+                    if _test_ga and not self._test_go_away_done:
+                        self._test_go_away_done = True
+                        tg.create_task(self._test_go_away(_test_ga))
                     if self._results.pending:
                         # A tool finished while the previous connection was
                         # going away: its answer is still owed to the user.

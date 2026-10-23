@@ -58,7 +58,9 @@ PATCH a cada correção. Tags: `v55.x.y`.
   `screen_process` não atravessa a reconexão (o modelo avisa e oferece olhar de novo, e a câmera
   aberta por ela é fechada). Ferramenta que levanta exceção agora devolve um erro ao modelo em vez
   de deixá-lo esperando (`core/live_session.py`: `go_away_should_reconnect`, `ResultMailbox`,
-  `orphan_prompt`).
+  `orphan_prompt`). Para testar sem esperar 10 min: `JARVIS_TEST_GOAWAY=40,20` simula o aviso
+  aos 40 s com 20 s de prazo, e `JARVIS_TEST_GOAWAY=tool,20` simula o aviso quando a próxima
+  ferramenta começa.
 
 Bugs do código do upstream vistos nos logs reais da validação da spec 001 (2026-10-17):
 - `open_app` dizia "Opened C:\…\arquivo.txt." para um arquivo que não existe (o `:` do drive caía

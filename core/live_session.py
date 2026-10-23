@@ -177,6 +177,11 @@ def go_away_should_reconnect(left_s: float, *, playing: bool, model_quiet_s: flo
 # be replayed on the new connection: resumption handles are only issued while
 # the session is `resumable`, which it is not while a function call is pending,
 # so the resumed session has never seen that call. The result goes in as text.
+# Measured in the real app on 2026-10-22 (GoAway injected as a research
+# web_search started): the resumed session still knew the request and the model
+# re-issued the same call by itself 10 s after reconnecting; the text arrived
+# while that call was pending and produced an empty turn, and the answer was
+# spoken once. The text stays as the safety net for when the model does not.
 
 # Per result. A `research` web_search runs to a few thousand characters; the
 # cap only stops a pathological result from flooding the context.
