@@ -17,7 +17,7 @@ API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
-from core import gemini
+from core import confirm, fs_policy, gemini
 
 MODEL_PLANNER    = gemini.SMART
 MODEL_WRITER     = gemini.SMART
@@ -163,9 +163,12 @@ def _write_file(
     project_dir: Path,
     already_written: dict[str, str],
 ) -> str:
+    file_path = file_info["path"]
+    # The model names the paths: confine to the project, then ask the policy, before the
+    # (60 s) model call so an escaping file costs nothing (FR-012).
+    full_path = fs_policy.require(fs_policy.confined(project_dir, file_path), "write", actor="dev_agent")
     model = _get_model(MODEL_WRITER)
 
-    file_path = file_info["path"]
     file_desc = file_info.get("description", "")
     file_imports = file_info.get("imports", [])
 
@@ -227,7 +230,6 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -381,6 +383,11 @@ def _fix_files(
     updated_codes: dict[str, str] = {}
 
     for fix_path in files_to_fix:
+        try:
+            full_path = fs_policy.require(fs_policy.confined(project_dir, fix_path), "write", actor="dev_agent")
+        except fs_policy.PolicyDenied as e:
+            print(f"[DevAgent] ⚠️ Not fixing {fix_path}: {e}")
+            continue
         current_code = file_codes.get(fix_path, "")
 
         other_ctx = ""
@@ -425,7 +432,6 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -467,7 +473,11 @@ def _build_project(
 
     proj_name    = project_name or plan.get("project_name", "jarvis_project")
     proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
-    project_dir  = PROJECTS_DIR / proj_name
+    try:
+        project_dir = fs_policy.require(PROJECTS_DIR / proj_name, "write", actor="dev_agent")
+    except fs_policy.PolicyDenied as e:
+        if speak: speak("That folder is not on your allowed list, sir.")
+        return str(e)
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])
@@ -483,6 +493,7 @@ def _build_project(
     sorted_files = sorted(files, key=_dep_sort_key)
 
     file_codes: dict[str, str] = {}
+    skipped: list[str] = []
 
     for file_info in sorted_files:
         file_path = file_info.get("path", "")
@@ -503,6 +514,11 @@ def _build_project(
                 file_codes[file_path] = code
                 time.sleep(0.4)
                 break
+            except fs_policy.PolicyDenied as e:
+                # Escapes the project folder (or a read-only root): skip this file only (FR-012).
+                log(f"Skipped {file_path}: {e}")
+                skipped.append(file_path)
+                break
             except RateLimitError:
                 if attempt == 0:
                     log("Rate limit — waiting 20s...")
@@ -518,67 +534,81 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    if dependencies:
-        install_result = _install_dependencies(dependencies, project_dir)
-        log(install_result)
+    opened = _open_vscode(project_dir)
 
-    _open_vscode(project_dir)
+    def install_and_run() -> str:
+        # Both steps are irreversible (pip install, running generated code), so they sit
+        # behind one confirmation instead of running inside the tool call (Principle IV).
+        if dependencies:
+            install_result = _install_dependencies(dependencies, project_dir)
+            log(install_result)
 
-    last_output   = ""
-    auto_installs = 0  
+        last_output   = ""
+        auto_installs = 0  
 
-    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
-        log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
-        last_output = _run_project(run_command, project_dir, timeout)
-        log(f"Output preview: {last_output[:150]}")
+        for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
+            log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
+            last_output = _run_project(run_command, project_dir, timeout)
+            log(f"Output preview: {last_output[:150]}")
 
-        if not _has_error(last_output, run_command):
-            msg = (
-                f"Project '{proj_name}' is working, sir. "
-                f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
-                f"Saved to: {project_dir}"
-            )
-            if speak: speak(msg)
-            return f"{msg}\n\nOutput:\n{last_output}"
+            if not _has_error(last_output, run_command):
+                msg = (
+                    f"Project '{proj_name}' is working, sir. "
+                    f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
+                    f"Saved to: {project_dir}"
+                )
+                if speak: speak(msg)
+                return f"{msg}\n\nOutput:\n{last_output}"
 
-        if attempt == MAX_FIX_ATTEMPTS:
-            break
+            if attempt == MAX_FIX_ATTEMPTS:
+                break
 
-        error_type = _classify_error(last_output)
-        if error_type == "dependency_error" and auto_installs < 3:
-            installed = _try_auto_install(last_output, project_dir)
-            if installed:
-                auto_installs += 1
-                log("Missing dependency installed, retrying...")
+            error_type = _classify_error(last_output)
+            if error_type == "dependency_error" and auto_installs < 3:
+                installed = _try_auto_install(last_output, project_dir)
+                if installed:
+                    auto_installs += 1
+                    log("Missing dependency installed, retrying...")
+                    time.sleep(1)
+                    continue
+
+            log(f"Fixing errors (type: {error_type})...")
+            try:
+                updated = _fix_files(
+                    error_output=last_output,
+                    project_description=description,
+                    all_files=files,
+                    file_codes=file_codes,
+                    language=language,
+                    project_dir=project_dir,
+                    entry_point=entry_point,
+                )
+                file_codes.update(updated)
                 time.sleep(1)
-                continue
+            except RateLimitError:
+                msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
+                if speak: speak(msg)
+                return msg
+            except Exception as e:
+                log(f"Fix step failed: {e}")
 
-        log(f"Fixing errors (type: {error_type})...")
-        try:
-            updated = _fix_files(
-                error_output=last_output,
-                project_description=description,
-                all_files=files,
-                file_codes=file_codes,
-                language=language,
-                project_dir=project_dir,
-                entry_point=entry_point,
-            )
-            file_codes.update(updated)
-            time.sleep(1)
-        except RateLimitError:
-            msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
-            if speak: speak(msg)
-            return msg
-        except Exception as e:
-            log(f"Fix step failed: {e}")
+        msg = (
+            f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
+            f"Project is saved at {project_dir} — open it in VSCode and check manually."
+        )
+        if speak: speak(msg)
+        return f"{msg}\n\nLast error:\n{last_output[:600]}"
 
-    msg = (
-        f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
-        f"Project is saved at {project_dir} — open it in VSCode and check manually."
-    )
-    if speak: speak(msg)
-    return f"{msg}\n\nLast error:\n{last_output[:600]}"
+
+    deps = ", ".join(dependencies) if dependencies else "none"
+    pending = confirm.request(
+        key="dev_agent_run", title=f"Install and run {proj_name}",
+        detail=f"Dependencies: {deps}\nRun: {run_command}\nIn: {project_dir}",
+        run=install_and_run, report=True)
+    note = f" Skipped (outside the project folder): {', '.join(skipped)}." if skipped else ""
+    return (f"Project '{proj_name}' generated at {project_dir} ({len(file_codes)} files, "
+            f"{'opened in VS Code' if opened else 'VS Code did not open'}).{note} Installing dependencies and running it is waiting for "
+            f"the user's on-screen confirmation. {pending}")
 
 
 def dev_agent(
@@ -597,14 +627,17 @@ def dev_agent(
     if not description:
         return "Please describe the project you want me to build, sir."
 
-    return _build_project(
-        description  = description,
-        language     = language,
-        project_name = project_name,
-        timeout      = timeout,
-        speak        = speak,
-        player       = player,
-    )
+    try:
+        return _build_project(
+            description  = description,
+            language     = language,
+            project_name = project_name,
+            timeout      = timeout,
+            speak        = speak,
+            player       = player,
+        )
+    except fs_policy.PolicyDenied as e:
+        return str(e)
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────

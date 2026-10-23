@@ -29,6 +29,8 @@ import threading
 import webbrowser
 from pathlib import Path
 
+from core import fs_policy
+
 _YT = re.compile(r"(youtube\.com/|youtu\.be/)", re.I)
 
 # Which open request is the current one. Opening happens on a thread now, so
@@ -201,6 +203,12 @@ def video_player(parameters: dict = None, response=None, player=None,
 
     local = _local_path(source)
     if local:
+        # A local file is a path the model chose: same read check as every other action
+        # (spec 003). URLs never reach this branch, so they skip the policy.
+        try:
+            local = str(fs_policy.require(local, "read", actor="video_player"))
+        except fs_policy.PolicyDenied as e:
+            return str(e)
         player.show_video(local, Path(local).name, muted=True)
         return f"Playing {Path(local).name} on the display, muted."
 

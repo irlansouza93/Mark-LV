@@ -2716,6 +2716,261 @@ class MemoryOverlay(_HudOverlay):
         QTimer.singleShot(0, self._rebuild)
 
 
+class AllowedFoldersOverlay(_HudOverlay):
+    """Which folders JARVIS may open, and whether it may change anything in them.
+
+    The list used to be hard-coded in the file tools; now the person owns it
+    (spec 003). Protected items (SSH keys, the app's own secrets...) stay off
+    limits even inside an allowed folder, so allowing the home folder is safe:
+    the 'Always protected' section below lists exactly what that means."""
+
+    _OW = 560
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            AllowedFoldersOverlay {{
+                background: rgba(0, 6, 10, 246);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        self.setFixedWidth(self._OW)
+
+        from memory.config_manager import get_allowed_folders
+        self._items = [dict(i) for i in get_allowed_folders()]
+        self._combos: list[QComboBox] = []
+        self._status = ""
+        self._status_bad = False
+        self._show_protected = False
+
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(20, 16, 20, 16)
+        self._lay.setSpacing(5)
+        self._rebuild()
+
+    # Same teardown / sizing dance as MemoryOverlay (see the notes there): the
+    # overlay sits in no layout, so rows must be hidden at once and the panel
+    # re-sized twice.
+    _clear_layout = MemoryOverlay._clear_layout
+    _settle = MemoryOverlay._settle
+
+    @staticmethod
+    def _btn(text: str, color: str, border: str, h: int = 30, bold=False) -> QPushButton:
+        b = QPushButton(text)
+        b.setFixedHeight(h)
+        b.setFont(QFont("Courier New", 9, QFont.Weight.Bold if bold else QFont.Weight.Normal))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {color};
+                border: 1px solid {border}; border-radius: 3px; padding: 0 10px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        return b
+
+    @staticmethod
+    def _contains_protected(folder: str) -> bool:
+        """True when a protected path lies inside `folder` (e.g. ~ holds .ssh).
+        Compares against the rule list only: no disk walk, so it is free on the
+        Qt thread."""
+        try:
+            from core import fs_policy
+            base = Path(os.path.expanduser(folder)).resolve()
+            for r in fs_policy.deny_rules():
+                if r.kind == "path" and isinstance(r.value, (str, Path)):
+                    v = Path(r.value)
+                    if v != base and base in v.parents:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _harvest(self):
+        """Copy the mode combos back into the items before any rebuild."""
+        for it, cb in zip(self._items, self._combos):
+            it["mode"] = cb.currentData() or "ro"
+
+    def _rebuild(self):
+        before = self.geometry()
+        self._clear_layout()
+        self._combos = []
+
+        from memory.config_manager import allowed_folders_error
+
+        hdr = QLabel("📁  ALLOWED FOLDERS")
+        hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._lay.addWidget(hdr)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        self._lay.addWidget(sep)
+
+        err = allowed_folders_error()
+        if err:
+            w = QLabel(f"⚠  {err}")
+            w.setWordWrap(True)
+            w.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            w.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+            self._lay.addWidget(w)
+
+        cap = QLabel("JARVIS can open files only inside these folders. READ ONLY "
+                     "means look but never change. Protected items stay off limits.")
+        cap.setWordWrap(True)
+        cap.setFont(QFont("Courier New", 7))
+        cap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._lay.addWidget(cap)
+
+        combo_css = (
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 6px; }}"
+            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+            f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
+            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}"
+        )
+        for idx, it in enumerate(self._items):
+            path = it.get("path", "")
+            box = QVBoxLayout(); box.setSpacing(1)
+            line = QHBoxLayout(); line.setSpacing(6)
+
+            name = QLabel(path)
+            name.setWordWrap(True)
+            name.setToolTip(path)
+            name.setFont(QFont("Courier New", 8))
+            name.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+            line.addWidget(name, 1)
+
+            if not os.path.isdir(os.path.expanduser(path)):
+                miss = QLabel("MISSING")
+                miss.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+                miss.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+                line.addWidget(miss)
+
+            cb = QComboBox()
+            cb.setFont(QFont("Courier New", 8))
+            cb.setFixedSize(130, 26)
+            cb.setStyleSheet(combo_css)
+            cb.addItem("READ ONLY", "ro")
+            cb.addItem("READ & WRITE", "rw")
+            cb.setCurrentIndex(1 if it.get("mode") == "rw" else 0)
+            self._combos.append(cb)
+            line.addWidget(cb)
+
+            rm = QPushButton("REMOVE")
+            rm.setFixedHeight(26)
+            rm.setFont(QFont("Courier New", 7))
+            rm.setCursor(Qt.CursorShape.PointingHandCursor)
+            rm.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px; padding: 0 6px; }}
+                QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
+            """)
+            rm.clicked.connect(lambda _=False, i=idx: self._remove(i))
+            line.addWidget(rm)
+            box.addLayout(line)
+
+            if self._contains_protected(path):
+                note = QLabel("protected items inside stay off limits")
+                note.setFont(QFont("Courier New", 7))
+                note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+                box.addWidget(note)
+
+            holder = QWidget(); holder.setLayout(box)
+            self._lay.addWidget(holder)
+
+        # Always-protected list: read-only, collapsed by default.
+        tog = QPushButton(("▾" if self._show_protected else "▸") + "  Always protected")
+        tog.setFlat(True)
+        tog.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        tog.setCursor(Qt.CursorShape.PointingHandCursor)
+        tog.setStyleSheet(f"QPushButton {{ color: {C.TEXT_MED}; background: transparent; "
+                          f"border: none; text-align: left; }}")
+        tog.clicked.connect(self._toggle_protected)
+        self._lay.addWidget(tog)
+        if self._show_protected:
+            try:
+                from core import fs_policy
+                rules = fs_policy.deny_rules()
+            except Exception:
+                rules = []
+            lines = [f"{r.reason}  -  "
+                     f"{'/'.join(r.value) if r.kind == 'parts' else r.value}"
+                     for r in rules]
+            lbl = QLabel("<br>".join(l.replace("<", "&lt;") for l in lines) or "-")
+            lbl.setWordWrap(True)
+            lbl.setFont(QFont("Courier New", 7))
+            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFixedHeight(130)
+            scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {C.BORDER}; "
+                                 f"border-radius: 3px; background: transparent; }}")
+            scroll.setWidget(lbl)
+            self._lay.addWidget(scroll)
+
+        if self._status:
+            st = QLabel(self._status)
+            st.setWordWrap(True)
+            st.setFont(QFont("Courier New", 8))
+            st.setStyleSheet(f"color: {C.RED if self._status_bad else C.GREEN}; "
+                             f"background: transparent;")
+            self._lay.addWidget(st)
+
+        row = QHBoxLayout(); row.setSpacing(8)
+        add = self._btn("+  ADD FOLDER", C.PRI, C.PRI_DIM)
+        add.clicked.connect(self._add)
+        row.addWidget(add)
+        save = self._btn("▸  SAVE", C.PRI, C.PRI_DIM, bold=True)
+        save.clicked.connect(self._save)
+        row.addWidget(save)
+        close = self._btn("CLOSE", C.TEXT_MED, C.BORDER)
+        close.clicked.connect(self.hide)
+        row.addWidget(close)
+        self._lay.addLayout(row)
+
+        self._settle(before)
+        QTimer.singleShot(0, lambda g=before: self._settle(g))
+
+    def _later_rebuild(self):
+        # Never rebuild inside the click handler of a widget it destroys (see
+        # MemoryOverlay._forget).
+        QTimer.singleShot(0, self._rebuild)
+
+    def _toggle_protected(self):
+        self._harvest()
+        self._show_protected = not self._show_protected
+        self._later_rebuild()
+
+    def _remove(self, idx: int):
+        self._harvest()
+        if 0 <= idx < len(self._items):
+            del self._items[idx]
+        self._status = ""
+        self._later_rebuild()
+
+    def _add(self):
+        self._harvest()
+        picked = QFileDialog.getExistingDirectory(
+            self, "Allow a folder", os.path.expanduser("~"))
+        if not picked:
+            return
+        picked = os.path.normpath(picked)
+        if not any(os.path.normcase(i.get("path", "")) == os.path.normcase(picked)
+                   for i in self._items):
+            self._items.append({"path": picked, "mode": "ro"})
+        self._status = ""
+        self._later_rebuild()
+
+    def _save(self):
+        from memory.config_manager import save_allowed_folders
+        self._harvest()
+        why = save_allowed_folders(self._items)
+        self._status_bad = bool(why)
+        self._status = why or "Saved."
+        self._later_rebuild()
+
+
 class ClipboardPanel(QWidget):
     """Floating panel shown when text is copied — offers quick Jarvis actions."""
 
@@ -5075,6 +5330,14 @@ class MainWindow(QMainWindow):
         mem_btn.clicked.connect(self._open_memory_panel)
         lay.addWidget(mem_btn)
 
+        fold_btn = QPushButton("📁  ALLOWED FOLDERS")
+        fold_btn.setFixedHeight(26)
+        fold_btn.setFont(QFont("Courier New", 7))
+        fold_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        fold_btn.setStyleSheet(_BTN_STYLE_DIM)
+        fold_btn.clicked.connect(self._open_allowed_folders)
+        lay.addWidget(fold_btn)
+
         plugin_btn = QPushButton("🧩  PLUGINS")
         plugin_btn.setFixedHeight(26)
         plugin_btn.setFont(QFont("Courier New", 7))
@@ -6388,6 +6651,11 @@ class MainWindow(QMainWindow):
         ov = MemoryOverlay(parent=self.centralWidget())
         self._centre_overlay(ov)
         self._memory_overlay = ov
+
+    def _open_allowed_folders(self):
+        ov = AllowedFoldersOverlay(parent=self.centralWidget())
+        self._centre_overlay(ov)
+        self._allowed_folders_overlay = ov
 
     # ── Irreversible-action confirmation ─────────────────────────────────────
 

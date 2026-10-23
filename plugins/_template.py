@@ -34,6 +34,14 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     """
     example_arg = parameters.get("example_arg", "")
     try:
+        # Touching a file or folder the model chose? Ask the folder policy first (spec 003):
+        #   from core import fs_policy   # import at the top of the file
+        #   path = fs_policy.require(example_arg, "read", actor=PLUGIN["name"])  # or "write"
+        # and use the returned path, not the raw one. When the folder is not allowed it
+        # raises fs_policy.PolicyDenied; its text is already the sentence the model needs,
+        # so return it as is (catch PolicyDenied before the generic Exception below):
+        #   except fs_policy.PolicyDenied as e:
+        #       return str(e)
         result_text = f"Did the thing with {example_arg}."
     except Exception as e:
         return f"Sir, my_plugin failed: {e}"

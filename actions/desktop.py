@@ -9,6 +9,8 @@ import platform
 from pathlib import Path
 from datetime import datetime
 
+from core import confirm, fs_policy
+
 try:
     import pyautogui
     _PYAUTOGUI = True
@@ -152,6 +154,18 @@ Task: {task}"""
         return code
     except Exception as e:
         return f"ERROR: {e}"
+
+def _confirmed_task(code: str, player=None) -> str:
+    # The model's own code runs only after the user says yes on the HUD banner (FR-006).
+    # There is no path to decide, so the banner shows the first 12 lines of what will run;
+    # report=True hands the outcome back to the model once the user answers.
+    if not code or code.strip() == "UNSAFE" or code.startswith("ERROR:"):
+        return _execute_generated_code(code, player=player)
+    detail = chr(10).join(code.strip().splitlines()[:12])
+    return confirm.request(
+        key="desktop_task", title="Run a desktop task", detail=detail,
+        run=lambda: _execute_generated_code(code, player=player), report=True)
+
 
 def set_wallpaper(image_path: str) -> str:
     path = Path(image_path).expanduser().resolve()
@@ -438,7 +452,10 @@ def desktop_control(
     try:
         if action == "wallpaper":
             path = params.get("path", "")
-            return set_wallpaper(path) if path else "No image path provided."
+            if not path:
+                return "No image path provided."
+            fs_policy.require(path, "read", actor="desktop")
+            return set_wallpaper(path)
 
         elif action == "wallpaper_url":
             url = params.get("url", "")
@@ -448,9 +465,11 @@ def desktop_control(
             return get_current_wallpaper()
 
         elif action == "organize":
+            fs_policy.require(_get_desktop(), "write", actor="desktop")
             return organize_desktop(params.get("mode", "by_type"))
 
         elif action == "clean":
+            fs_policy.require(_get_desktop(), "write", actor="desktop")
             return clean_desktop()
 
         elif action == "list":
@@ -469,14 +488,16 @@ def desktop_control(
                 player.write_log("[Desktop] Generating action...")
 
             code = _ask_gemini_for_desktop_action(actual_task)
-            return _execute_generated_code(code, player=player)
+            return _confirmed_task(code, player=player)
 
         else:
             if action:
                 code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
+                return _confirmed_task(code, player=player)
             return "No action or task specified."
 
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         print(f"[Desktop] Error: {e}")
         return f"Desktop control error: {e}"

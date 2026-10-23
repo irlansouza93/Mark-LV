@@ -18,7 +18,7 @@ MAX_BUILD_ATTEMPTS = 3
 # Model choice lives in core/gemini.py, and so does the timeout and the
 # fallback ladder. Writing a model name here is what left this file hanging
 # forever whenever that one alias was unwell.
-from core import gemini
+from core import confirm, fs_policy, gemini
 
 
 def _get_api_key() -> str:
@@ -58,15 +58,18 @@ def _resolve_save_path(output_path: str, language: str) -> Path:
     }
     if output_path:
         p = Path(output_path)
-        return p if p.is_absolute() else DESKTOP / p
-    ext = ext_map.get((language or "python").lower(), ".py")
-    return DESKTOP / f"jarvis_code{ext}"
+        p = p if p.is_absolute() else DESKTOP / p
+    else:
+        ext = ext_map.get((language or "python").lower(), ".py")
+        p = DESKTOP / f"jarvis_code{ext}"
+    # The default (Desktop) goes through the policy too: it is only a default, not a grant.
+    return fs_policy.require(p, "write", actor="code_helper")
 
 
 def _read_file(file_path: str) -> tuple[str, str]:
     if not file_path:
         return "", "No file path provided."
-    p = Path(file_path)
+    p = fs_policy.require(file_path, "read", actor="code_helper")
     if not p.exists():
         return "", f"File not found: {file_path}"
     try:
@@ -76,6 +79,7 @@ def _read_file(file_path: str) -> tuple[str, str]:
 
 
 def _save_file(path: Path, content: str) -> str:
+    path = fs_policy.require(path, "write", actor="code_helper")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -166,6 +170,8 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
 
 def _write(description: str, language: str, output_path: str, player=None) -> tuple[str, Path]:
     lang  = language or "python"
+    # Resolve (and check) the destination first: a refused path must not cost a Gemini call.
+    path  = _resolve_save_path(output_path, lang)
     model = _get_gemini()
 
     prompt = f"""You are an expert {lang} developer.
@@ -183,7 +189,6 @@ Code:"""
 
     response = model.generate_content(prompt)
     code     = _clean_code(response.text)
-    path     = _resolve_save_path(output_path, lang)
     _save_file(path, code)
     return code, path
 
@@ -208,17 +213,32 @@ Fixed code:"""
     return _clean_code(response.text)
 
 
+# Module level so the confirmation banner can name the interpreter that will run.
+_INTERPRETERS = {
+    ".py":  [sys.executable],
+    ".js":  ["node"],
+    ".ts":  ["ts-node"],
+    ".sh":  ["bash"],
+    ".ps1": ["powershell", "-File"],
+    ".rb":  ["ruby"],
+    ".php": ["php"],
+}
+
+
+def _confirm_run(path: Path, run) -> str:
+    """Running model-written or user-named code is irreversible (Principle IV): the folder
+    must allow exec, then ONE on-screen confirmation; the outcome comes back as
+    [CONFIRMED_RESULT] (spec 003, R6)."""
+    path = fs_policy.require(path, "exec", actor="code_helper")
+    interp = _INTERPRETERS.get(path.suffix.lower())
+    return confirm.request(
+        key="code_run", title=f"Run {path.name}",
+        detail=f"{' '.join(interp) if interp else '?'} {path}",
+        run=run, report=True)
+
+
 def _run_file(path: Path, args: list, timeout: int) -> str:
-    interpreters = {
-        ".py":  [sys.executable],
-        ".js":  ["node"],
-        ".ts":  ["ts-node"],
-        ".sh":  ["bash"],
-        ".ps1": ["powershell", "-File"],
-        ".rb":  ["ruby"],
-        ".php": ["php"],
-    }
-    interp = interpreters.get(path.suffix.lower())
+    interp = _INTERPRETERS.get(path.suffix.lower())
     if not interp:
         return f"No interpreter for {path.suffix}."
 
@@ -256,11 +276,21 @@ def _build(description, language, output_path, args, timeout, speak=None, player
     try:
         code, path = _write(description, lang, output_path, player)
         print(f"[Code] ✅ Written: {path}")
+    except fs_policy.PolicyDenied:
+        raise
     except Exception as e:
         msg = f"Could not write initial code: {e}"
         if speak: speak(msg)
         return msg
 
+    # The code is on disk (reversible); ONE confirmation covers the whole run -> fix -> run
+    # cycle (up to MAX_BUILD_ATTEMPTS runs) instead of one question per attempt.
+    pending = _confirm_run(
+        path, lambda: _build_cycle(code, path, description, args, timeout, speak, player))
+    return f"Code written to {path}. {pending}"
+
+
+def _build_cycle(code, path, description, args, timeout, speak=None, player=None) -> str:
     last_output = ""
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
         print(f"[Code] 🔄 Attempt {attempt}/{MAX_BUILD_ATTEMPTS}")
@@ -306,6 +336,8 @@ def _write_action(description, language, output_path, player) -> str:
         code, path = _write(description, language, output_path, player)
         print(f"[Code] ✅ Written: {path}")
         return f"Code written. Saved to: {path}\n\nPreview:\n{_preview(code)}"
+    except fs_policy.PolicyDenied:
+        raise
     except Exception as e:
         return f"Could not generate code: {e}"
 
@@ -377,12 +409,12 @@ Explanation:"""
 def _run_action(file_path, args, timeout, player) -> str:
     if not file_path:
         return "Please provide a file path to run, sir."
-    p = Path(file_path)
+    p = fs_policy.require(file_path, "exec", actor="code_helper")
     if not p.exists():
         return f"File not found: {file_path}"
     if player:
         player.write_log(f"[Code] Running {p.name}...")
-    return _run_file(p, args, timeout)
+    return _confirm_run(p, lambda: _run_file(p, args, timeout))
 
 
 def _optimize_action(file_path, code, language, output_path, player) -> str:
@@ -507,9 +539,13 @@ Be specific and actionable. If you see an error message, quote it exactly."""
             if code_match:
                 fixed_code = code_match.group(1).strip()
                 save_path  = Path(file_path)
-                _save_file(save_path, fixed_code)
-                analysis += f"\n\n✅ Fixed code has been saved to: {file_path}"
-                print(f"[Code] ✅ Fixed code saved: {file_path}")
+                try:
+                    _save_file(save_path, fixed_code)
+                    analysis += f"\n\n✅ Fixed code has been saved to: {file_path}"
+                    print(f"[Code] ✅ Fixed code saved: {file_path}")
+                except fs_policy.PolicyDenied as e:
+                    # Read-only folder: keep the analysis, tell the model the fix was not saved.
+                    analysis += f"\n\n{e}"
 
         return analysis
 
@@ -522,7 +558,14 @@ Be specific and actionable. If you see an error message, quote it exactly."""
         return f"Screen analysis failed: {e}"
 
 
-def code_helper(
+def code_helper(parameters: dict, response=None, player=None, session_memory=None, speak=None) -> str:
+    try:
+        return _code_helper(parameters, response, player, session_memory, speak)
+    except fs_policy.PolicyDenied as e:
+        return str(e)
+
+
+def _code_helper(
     parameters: dict,
     response=None,
     player=None,

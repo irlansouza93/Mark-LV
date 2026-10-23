@@ -13,6 +13,8 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
+from core import fs_policy
+
 from playwright.async_api import (
     async_playwright,
     BrowserContext,
@@ -870,9 +872,13 @@ class _BrowserSession:
     async def screenshot(self, path: str = None) -> str:
         page = await self._get_page()
         try:
-            save_path = path or str(Path.home() / "Desktop" / "jarvis_screenshot.png")
+            save_path = str(fs_policy.require(
+                path or str(Path.home() / "Desktop" / "jarvis_screenshot.png"),
+                "write", actor="browser_control"))
             await page.screenshot(path=save_path, full_page=False)
             return f"Screenshot saved: {save_path}"
+        except fs_policy.PolicyDenied as e:
+            return str(e)
         except Exception as e:
             return f"Screenshot error: {e}"
 

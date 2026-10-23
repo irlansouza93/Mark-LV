@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
-from core import gemini
+from core import gemini, fs_policy
 
 def _get_api_key() -> str:
     config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
@@ -83,7 +83,10 @@ def _file_size_str(path: Path) -> str:
 def _output_path(src: Path, suffix: str, new_ext: str = None) -> Path:
     ext  = new_ext or src.suffix
     name = f"{src.stem}_{suffix}{ext}"
-    return src.parent / name
+    # Every result file is born here, so one write check covers all handlers (spec 003).
+    # The uploaded file is readable anywhere, but its result lands beside it and that
+    # folder must allow writing; PolicyDenied surfaces through file_processor().
+    return fs_policy.require(src.parent / name, "write", actor="file_processor")
 
 def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
     try:
@@ -737,11 +740,53 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
             return f"List failed: {e}"
 
     if action == "extract":
-        dest = Path(params.get("destination", str(path.parent / path.stem)))
+        dest = fs_policy.require(
+            Path(params.get("destination", str(path.parent / path.stem))),
+            "write", actor="file_processor")
         dest.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.unpack_archive(path, dest)
-            return f"Extracted to: {dest}"
+            # Member by member through confined(): shutil.unpack_archive would write a
+            # "../evil.txt" entry outside dest (zip-slip). An escaping member is skipped
+            # and named, the rest is extracted (FR-012).
+            import zipfile, tarfile
+            skipped, count = [], 0
+            if path.suffix.lower() == ".zip":
+                with zipfile.ZipFile(path) as z:
+                    for info in z.infolist():
+                        try:
+                            target = fs_policy.confined(dest, info.filename)
+                        except fs_policy.PolicyDenied:
+                            skipped.append(info.filename)
+                            continue
+                        if info.is_dir():
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with z.open(info) as src, open(target, "wb") as out:
+                            shutil.copyfileobj(src, out)
+                        count += 1
+            else:
+                with tarfile.open(path) as t:
+                    for m in t.getmembers():
+                        if not (m.isfile() or m.isdir()):
+                            skipped.append(m.name)      # links/devices never leave the archive
+                            continue
+                        try:
+                            target = fs_policy.confined(dest, m.name)
+                        except fs_policy.PolicyDenied:
+                            skipped.append(m.name)
+                            continue
+                        if m.isdir():
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with t.extractfile(m) as src, open(target, "wb") as out:
+                            shutil.copyfileobj(src, out)
+                        count += 1
+            msg = f"Extracted {count} file(s) to: {dest}"
+            if skipped:
+                msg += f". Skipped {len(skipped)} unsafe item(s): {', '.join(skipped[:10])}"
+            return msg
         except Exception as e:
             return f"Extract failed: {e}"
 
@@ -786,7 +831,10 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     if not file_path_str:
         return "No file path provided."
 
-    path = Path(file_path_str)
+    try:
+        path = fs_policy.require(file_path_str, "read", actor="file_processor")
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     if not path.exists():
         return f"File not found: {file_path_str}"
     if not path.is_file():
@@ -835,6 +883,8 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     try:
         result = handler(path, action, params, speak)
         return result or "Done."
+    except fs_policy.PolicyDenied as e:
+        return str(e)
     except Exception as e:
         import traceback
         traceback.print_exc()
