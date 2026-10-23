@@ -9,7 +9,7 @@ import platform
 from pathlib import Path
 from datetime import datetime
 
-from core import confirm, fs_policy
+from core import confirm, fs_policy, user_dirs
 
 try:
     import pyautogui
@@ -31,11 +31,7 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
     
 def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Desktop"
+    return user_dirs.desktop()
 
 def _build_sandbox() -> dict:
     import time

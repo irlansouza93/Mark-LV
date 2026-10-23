@@ -12,9 +12,11 @@ def get_base_dir():
     return Path(__file__).resolve().parent.parent
 
 
+from core import user_dirs
+
 BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
-PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
+PROJECTS_DIR     = user_dirs.desktop() / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import confirm, fs_policy, gemini

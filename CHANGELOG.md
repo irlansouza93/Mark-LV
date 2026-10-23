@@ -45,6 +45,7 @@ PATCH a cada correção. Tags: `v55.x.y`.
   Irlan em 2026-10-17.
 
 ### Fixed
+- Spec 003: os atalhos Desktop/Documents/Downloads/Pictures/Music/Videos agora seguem as pastas reais do sistema (`core/user_dirs.py`): redirecionamento do OneDrive no Windows, XDG no Linux. Antes usavam `~/Desktop`, uma pasta velha com 4 arquivos, e `pdf-dark` "não existia" (visto em 2026-10-23).
 - **Sessão de voz caía a cada ~10 min (GoAway)**: o servidor do Gemini Live avisa com `go_away`
   (e `time_left`) antes de fechar a conexão no limite de tempo; o app ignorava o aviso e era
   derrubado com `1008 (policy violation)` (56 vezes em 2026-10-19). Agora renova a conexão com o

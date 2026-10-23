@@ -15,7 +15,7 @@ import time
 import random
 from pathlib import Path
 
-from core import fs_policy
+from core import fs_policy, user_dirs
 
 try:
     import pyautogui
@@ -64,7 +64,7 @@ _SAFE_SCREENSHOT_ROOTS = (
 )
 
 def _safe_screenshot_path(requested: str | None) -> Path:
-    fallback = Path.home() / "Desktop" / "jarvis_screenshot.png"
+    fallback = user_dirs.desktop() / "jarvis_screenshot.png"
     if not requested:
         return fallback
     try:

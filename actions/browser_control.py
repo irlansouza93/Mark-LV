@@ -13,7 +13,7 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
-from core import fs_policy
+from core import fs_policy, user_dirs
 
 from playwright.async_api import (
     async_playwright,
@@ -890,7 +890,7 @@ class _BrowserSession:
         page = await self._get_page()
         try:
             save_path = str(fs_policy.require(
-                path or str(Path.home() / "Desktop" / "jarvis_screenshot.png"),
+                path or str(user_dirs.desktop() / "jarvis_screenshot.png"),
                 "write", actor="browser_control"))
             await page.screenshot(path=save_path, full_page=False)
             return f"Screenshot saved: {save_path}"
