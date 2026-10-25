@@ -36,6 +36,8 @@ PATCH a cada correção. Tags: `v55.x.y`.
     loop por 10 min) não foi executado, só coberto por testes do limite de rajada.
 - Wait safety net (spec 002): when the model stays silent after the user speaks, the HUD shows the thinking state (1.5 s), JARVIS says a short cached "one moment" phrase (4 s, once per request, rotating among 5 pt-BR variants) captured once from the Live model itself in the session's voice and checked against its transcript (TTS with the BCP-47 speech language as fallback, a short tone as last resort); the phrase always finishes before the answer, with a 0.2 s pause, and the mic is gated while it plays so it never reaches the model as user speech; and, after 20 s with no reply and no tool running, a give-up phrase plus a soft failure in logs/. Every request records its latency (`voice_wait`) in the usage log; `tools/usage_report.py` shows p50/p90/p95 with and without tools and suggests new limits. Limits live in `config/api_keys.json` → `wait_cue`.
 
+- Spec 003 — pastas liberadas (`core/fs_policy.py`): política central de acesso a disco. Pastas liberadas em modo só leitura ou leitura e escrita (⚙ SETUP → ALLOWED FOLDERS, salvas em `allowed_folders` de `config/api_keys.json`) e uma lista de negação fixa (segredos do app, chaves SSH, cofres de senha, perfis de navegador, `.git` interno, `.env`). Toda ação que toca um caminho escolhido pelo modelo passa por ela (`file_controller`, `code_helper`, `file_processor`, `desktop`, `video_player`, `browser_control`, `computer_control`, `dev_agent`). Rodar código escrito pelo modelo (`code_helper` run/build, `dev_agent` instalar e rodar, tarefa livre do `desktop`) agora pede confirmação na tela, e o resultado volta ao modelo (`confirm.request(report=True)`). Recusas vão para `logs/failures.jsonl` como `kind: "policy"`. Extração de arquivos compactados não escreve mais fora do destino.
+
 ### Changed
 - Exceção que escapa de um slot do Qt (ou de qualquer thread) não fecha mais o JARVIS: o
   `sys.excepthook` próprio da spec 001 registra a falha em `logs/failures.jsonl`, imprime o
@@ -43,6 +45,7 @@ PATCH a cada correção. Tags: `v55.x.y`.
   Irlan em 2026-10-17.
 
 ### Fixed
+- Spec 003: os atalhos Desktop/Documents/Downloads/Pictures/Music/Videos agora seguem as pastas reais do sistema (`core/user_dirs.py`): redirecionamento do OneDrive no Windows, XDG no Linux. Antes usavam `~/Desktop`, uma pasta velha com 4 arquivos, e `pdf-dark` "não existia" (visto em 2026-10-23).
 - **Sessão de voz caía a cada ~10 min (GoAway)**: o servidor do Gemini Live avisa com `go_away`
   (e `time_left`) antes de fechar a conexão no limite de tempo; o app ignorava o aviso e era
   derrubado com `1008 (policy violation)` (56 vezes em 2026-10-19). Agora renova a conexão com o

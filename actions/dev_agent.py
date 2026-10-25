@@ -12,12 +12,14 @@ def get_base_dir():
     return Path(__file__).resolve().parent.parent
 
 
+from core import user_dirs
+
 BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
-PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
+PROJECTS_DIR     = user_dirs.desktop() / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
-from core import gemini
+from core import confirm, fs_policy, gemini
 
 MODEL_PLANNER    = gemini.SMART
 MODEL_WRITER     = gemini.SMART
@@ -155,6 +157,22 @@ JSON:"""
             raise RateLimitError(str(e))
         raise
 
+# Folders whose contents run code by themselves when the project is opened or committed:
+# .vscode/tasks.json with runOn=folderOpen runs when VS Code opens the folder, a git hook
+# on the first commit. A generated project has no business writing them (review of spec 003).
+_SELF_RUNNING_DIRS = {".vscode", ".git"}
+
+
+def _checked_path(project_dir: Path, rel: str) -> Path:
+    """confined() + the policy + the self-running folders; raises PolicyDenied."""
+    full = fs_policy.require(fs_policy.confined(project_dir, rel), "write", actor="dev_agent")
+    if any(part.casefold() in _SELF_RUNNING_DIRS for part in re.split(r"[\\/]+", rel)):
+        raise fs_policy.PolicyDenied(fs_policy.Decision(
+            False, full, "write", "denied", actor="dev_agent",
+            deny_reason="VS Code and git settings run code on their own"))
+    return full
+
+
 def _write_file(
     file_info: dict,
     project_description: str,
@@ -163,9 +181,12 @@ def _write_file(
     project_dir: Path,
     already_written: dict[str, str],
 ) -> str:
+    file_path = file_info["path"]
+    # The model names the paths: confine to the project, then ask the policy, before the
+    # (60 s) model call so an escaping file costs nothing (FR-012).
+    full_path = _checked_path(project_dir, file_path)
     model = _get_model(MODEL_WRITER)
 
-    file_path = file_info["path"]
     file_desc = file_info.get("description", "")
     file_imports = file_info.get("imports", [])
 
@@ -227,7 +248,6 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -381,6 +401,11 @@ def _fix_files(
     updated_codes: dict[str, str] = {}
 
     for fix_path in files_to_fix:
+        try:
+            full_path = _checked_path(project_dir, fix_path)
+        except fs_policy.PolicyDenied as e:
+            print(f"[DevAgent] ⚠️ Not fixing {fix_path}: {e}")
+            continue
         current_code = file_codes.get(fix_path, "")
 
         other_ctx = ""
@@ -425,7 +450,6 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -467,7 +491,11 @@ def _build_project(
 
     proj_name    = project_name or plan.get("project_name", "jarvis_project")
     proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
-    project_dir  = PROJECTS_DIR / proj_name
+    try:
+        project_dir = fs_policy.require(PROJECTS_DIR / proj_name, "write", actor="dev_agent")
+    except fs_policy.PolicyDenied as e:
+        if speak: speak("That folder is not on your allowed list, sir.")
+        return str(e)
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])
@@ -483,6 +511,7 @@ def _build_project(
     sorted_files = sorted(files, key=_dep_sort_key)
 
     file_codes: dict[str, str] = {}
+    skipped: list[str] = []
 
     for file_info in sorted_files:
         file_path = file_info.get("path", "")
@@ -503,6 +532,11 @@ def _build_project(
                 file_codes[file_path] = code
                 time.sleep(0.4)
                 break
+            except fs_policy.PolicyDenied as e:
+                # Escapes the project folder (or a read-only root): skip this file only (FR-012).
+                log(f"Skipped {file_path}: {e}")
+                skipped.append(file_path)
+                break
             except RateLimitError:
                 if attempt == 0:
                     log("Rate limit — waiting 20s...")
@@ -518,6 +552,31 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
+    deps = ", ".join(dependencies) if dependencies else "none"
+    pending = confirm.request(
+        key="dev_agent_run", title=f"Install and run {proj_name}",
+        detail=(f"Dependencies: {deps}\nRun: {run_command}\nIn: {project_dir}\n"
+                "Also auto-installs missing packages it reports (up to 3), then opens VS Code."),
+        run=lambda: _install_and_run(
+            dependencies=dependencies, project_dir=project_dir, run_command=run_command,
+            timeout=timeout, description=description, files=files, file_codes=file_codes,
+            language=language, entry_point=entry_point, proj_name=proj_name,
+            speak=speak, log=log),
+        report=True)
+    note = f" Skipped (outside the project folder or self-running settings): {', '.join(skipped)}." if skipped else ""
+    return (f"Project '{proj_name}' generated at {project_dir} ({len(file_codes)} files, "
+            f"VS Code opens after you confirm).{note} Installing dependencies and running it is waiting for "
+            f"the user's on-screen confirmation. {pending}")
+
+
+def _install_and_run(*, dependencies, project_dir, run_command, timeout, description,
+                     files, file_codes, language, entry_point, proj_name, speak, log) -> str:
+    """The irreversible half of dev_agent: pip install, open the editor, run, fix, re-run.
+
+    Called only by the confirmed callable (Principle IV). It is a module-level function
+    (not a closure) so the original loop below keeps its indentation and the diff against
+    upstream stays small. VS Code opens here, after CONFIRM: a .vscode/tasks.json with
+    runOn=folderOpen would run code before the banner otherwise (review of spec 003)."""
     if dependencies:
         install_result = _install_dependencies(dependencies, project_dir)
         log(install_result)
@@ -597,14 +656,17 @@ def dev_agent(
     if not description:
         return "Please describe the project you want me to build, sir."
 
-    return _build_project(
-        description  = description,
-        language     = language,
-        project_name = project_name,
-        timeout      = timeout,
-        speak        = speak,
-        player       = player,
-    )
+    try:
+        return _build_project(
+            description  = description,
+            language     = language,
+            project_name = project_name,
+            timeout      = timeout,
+            speak        = speak,
+            player       = player,
+        )
+    except fs_policy.PolicyDenied as e:
+        return str(e)
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
