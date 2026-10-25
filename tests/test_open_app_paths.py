@@ -75,3 +75,18 @@ def test_keyboard_fallback_never_claims_success(monkeypatch):
     monkeypatch.setitem(oa._OS_LAUNCHERS, oa._SYSTEM, lambda n: None)   # typed into search
     out = oa.open_app({"app_name": "UmAppQueNaoExiste"})
     assert not out.startswith("Opened") and "cannot confirm" in out
+
+
+def test_guessed_home_desktop_maps_to_the_real_one(monkeypatch, tmp_path):
+    # real test 2026-10-25: the model sent C:/Users/<me>/Desktop/... while OneDrive
+    # keeps the real Desktop elsewhere
+    from pathlib import Path
+    from core import user_dirs
+    home, real = tmp_path / "home", tmp_path / "OneDrive" / "Desk"
+    (real / "pdf-dark").mkdir(parents=True)
+    (real / "pdf-dark" / "a.exe").write_bytes(b"MZ")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(user_dirs, "desktop", lambda: real)
+    assert oa._file_path_of(str(home / "Desktop" / "pdf-dark" / "a.exe")) == str(real / "pdf-dark" / "a.exe")
+    missing = str(home / "Desktop" / "nope.exe")
+    assert oa._file_path_of(missing) == missing          # still reported as missing

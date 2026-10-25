@@ -95,7 +95,7 @@ def _file_path_of(name: str) -> str | None:
     if "://" in raw:
         return None
     if _WIN_ABS_PATH.match(raw) or raw.startswith(("/", "~")):
-        return os.path.expandvars(os.path.expanduser(raw))
+        return _real_folder(os.path.expandvars(os.path.expanduser(raw)))
     # "desktop/pdf-dark/dist/pdf-dark.exe": the same shortcuts file_controller takes.
     # Before, this was typed into the Start menu search, which sent it to a web
     # search — and still answered "Opened" (2026-10-23).
@@ -104,6 +104,30 @@ def _file_path_of(name: str) -> str | None:
     if folder is not None:
         return str(folder() / rest.strip("/"))
     return None
+
+
+def _real_folder(path: str) -> str:
+    """~/Desktop/x → <real Desktop>/x when only the real one has it.
+
+    The model writes the conventional path itself: in the real test of 2026-10-25
+    "desktop/pdf-dark/…" came in as C:/Users/irlan/Desktop/pdf-dark/…, an old
+    folder, while OneDrive keeps the real Desktop elsewhere."""
+    if os.path.exists(path):
+        return path
+    from pathlib import Path
+    home = Path.home()
+    try:
+        rel = Path(path).relative_to(home)
+    except ValueError:
+        return path
+    if not rel.parts:
+        return path
+    first = rel.parts[0].lower()
+    get = _SHORTCUTS.get(first)
+    if get is None or first == "home":
+        return path
+    real = get() / Path(*rel.parts[1:])
+    return str(real) if real.exists() else path
 
 
 def _home():

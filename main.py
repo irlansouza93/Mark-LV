@@ -81,6 +81,7 @@ from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import fs_policy
+from core                      import user_dirs
 from core                      import audio_devices
 from core                      import errlog
 from core                      import llm_usage
@@ -255,7 +256,8 @@ def _describe_tools(declarations) -> str:
     return "\n".join(lines)
 
 
-def _describe_limits(has_vision: bool, has_mic: bool, folders=(), logs_dir: str = "") -> str:
+def _describe_limits(has_vision: bool, has_mic: bool, folders=(), logs_dir: str = "",
+                     desktop: str = "") -> str:
     """The other half of self-knowledge: what is out of reach, and why.
 
     Derived from how the program is actually built, not from a list of refusals.
@@ -292,6 +294,11 @@ def _describe_limits(has_vision: bool, has_mic: bool, folders=(), logs_dir: str 
         out.append(
             f"- Files: you work only inside the folders the user allowed — {listed}. "
             "Only the user grants a folder, in SETUP → ALLOWED FOLDERS; you cannot.")
+    if desktop:
+        out.append(
+            f"- The user's Desktop is {desktop}. Pass paths as the user said them "
+            "(\"desktop/…\", \"documents/…\", \"downloads/…\"): tools resolve them; "
+            "never rewrite them into a guessed full path.")
     out.append(
         "- Your own mistakes: report_problem saves them"
         + (f" to {logs_dir}" if logs_dir else "")
@@ -1452,6 +1459,7 @@ class JarvisLive:
                 has_mic=True,
                 folders=fs_policy.allowed_folders(),
                 logs_dir=str(errlog.ROOT / "logs"),
+                desktop=str(user_dirs.desktop()),
             ),
         })
 
