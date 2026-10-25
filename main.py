@@ -255,7 +255,7 @@ def _describe_tools(declarations) -> str:
     return "\n".join(lines)
 
 
-def _describe_limits(has_vision: bool, has_mic: bool) -> str:
+def _describe_limits(has_vision: bool, has_mic: bool, folders=(), logs_dir: str = "") -> str:
     """The other half of self-knowledge: what is out of reach, and why.
 
     Derived from how the program is actually built, not from a list of refusals.
@@ -283,6 +283,22 @@ def _describe_limits(has_vision: bool, has_mic: bool) -> str:
         out.append(
             "- You hear nothing while the microphone is muted, and you cannot "
             "unmute it yourself.")
+    # The two below exist because the model did not know them (2026-10-23/24): it
+    # could not say where its logs are, and it wrote "errors to fix in the
+    # assistant" into the user's own notes file, taking that for its memory.
+    if folders:
+        listed = "; ".join(f"{f.path} ({'read and write' if f.mode == 'rw' else 'read-only'})"
+                           for f in folders)
+        out.append(
+            f"- Files: you work only inside the folders the user allowed — {listed}. "
+            "Only the user grants a folder, in SETUP → ALLOWED FOLDERS; you cannot.")
+    out.append(
+        "- Your own mistakes: report_problem saves them"
+        + (f" to {logs_dir}" if logs_dir else "")
+        + ", where the developer reads them. That is the only place for notes "
+        "about your own errors or improvements — never the user's files or notes. "
+        "You cannot change your own code or settings, and nothing you note fixes "
+        "anything by itself: a fix arrives only with a new version of this app.")
     return "\n".join(out)
 
 
@@ -1434,6 +1450,8 @@ class JarvisLive:
             "limits": _describe_limits(
                 has_vision="screen_process" in _names,
                 has_mic=True,
+                folders=fs_policy.allowed_folders(),
+                logs_dir=str(errlog.ROOT / "logs"),
             ),
         })
 

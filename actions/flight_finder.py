@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -113,7 +114,9 @@ def _build_google_flights_url(
     return (
         f"{base}"
         f"?q={trip}"
-        f"&tfs=CBwQAhoeEgoyMDI1LTAzLTE1agcIARIDSVNUcgcIARIDTEhS"   
+        # No "tfs=": that blob encodes one fixed search (2025-03-15, IST → LHR) and
+        # Google Flights let it win over q=, so every search opened that old trip
+        # (seen 2026-10-23: MAO → SDQ came back empty eight times).
         f"&curr=USD"
         f"&cabin={cabin_code}"
         f"&adults={passengers}"
@@ -130,17 +133,23 @@ def _search_flights_browser(
     cabin:       str,
 ) -> tuple[str, str]:
     import time
-    from actions.browser_control import browser_control
+    from actions.browser_control import _registry
 
     url = _build_google_flights_url(
         origin, destination, date, return_date, passengers, cabin
     )
 
+    # Straight to the automation session. browser_control "go_to" opens the
+    # user's own browser, which nothing can read back, so the get_text after it
+    # read whatever the automation window happened to hold — empty, on 2026-10-23.
     print(f"[FlightFinder] 🌐 Opening: {url}")
-    browser_control({"action": "go_to", "url": url})
-    time.sleep(5)
+    sess = _registry.get(None)
+    sess.run(sess.go_to(url))
+    time.sleep(5)          # the results list renders after domcontentloaded
 
-    raw = browser_control({"action": "get_text"})
+    raw = sess.run(sess.get_text())
+    if raw.startswith("Could not get page text"):
+        raw = ""
     return (raw or ""), url
 
 def _parse_flights_with_gemini(
@@ -317,11 +326,28 @@ def flight_finder(parameters: dict, player=None, speak=None) -> str:
     date        = _parse_date(date_raw)
     return_date = _parse_date(return_raw) if return_raw else None
 
+    # One search at a time. On 2026-10-23 the model fired eight identical calls
+    # within 5 s; each opened a tab and raced to launch its own automation
+    # browser, and all eight came back empty.
+    if not _busy.acquire(blocking=False):
+        return ("A flight search is already running; its result will arrive by "
+                "itself. Do not call flight_finder again.")
+    try:
+        return _search(origin, destination, date, return_date, passengers, cabin,
+                       save, player)
+    finally:
+        _busy.release()
+
+
+_busy = threading.Lock()
+
+
+def _search(origin, destination, date, return_date, passengers, cabin, save, player) -> str:
+    # No speak() here: it sends its text to the model as a USER turn, so an English
+    # "Searching flights…, sir" was answered in English and re-triggered the tool
+    # (2026-10-23). The returned text is data the model words in the user's language.
     if player:
         player.write_log(f"[FlightFinder] {origin} → {destination} on {date}")
-
-    if speak:
-        speak(f"Searching flights from {origin} to {destination} on {date}, sir.")
 
     print(
         f"[FlightFinder] ▶️ {origin} → {destination} | {date}"
@@ -337,16 +363,8 @@ def flight_finder(parameters: dict, player=None, speak=None) -> str:
         if not raw_text:
             return "Could not retrieve flight data, sir. The page may not have loaded."
 
-        if speak:
-            speak("Analysing the results now, sir.")
-
         flights = _parse_flights_with_gemini(raw_text, origin, destination, date)
-        spoken  = _format_spoken(flights, origin, destination, date)
-
-        if speak:
-            speak(spoken)
-
-        result = spoken
+        result  = _format_spoken(flights, origin, destination, date)
 
         if save and flights:
             report     = _format_text_report(flights, origin, destination, date, return_date, page_url)

@@ -1330,11 +1330,30 @@ def record_report(expected, happened=None) -> str | None:
     logs/reports.jsonl. Returns None when queued, or a short reason (never raises). It also
     tells ``end_turn`` that this turn already has its report, so the automatic one is not
     written twice."""
-    global _tool_reported
+    global _tool_reported, _last_tool_report
+    try:
+        key = " ".join(str(expected or "").split()).casefold()
+    except Exception:
+        key = ""
+    now = _clock()
+    last = _last_tool_report
+    t = _thread
+    if (key and last and last[0] == key and 0 <= now - last[1] < _REPORT_REPEAT_S
+            and t is not None and t.is_alive()):         # a dead writer must still be reported
+        # The same request reported again: on 2026-10-23 one failed flight search
+        # became six reports in 13 s, each only rewording "happened". The first
+        # one already holds the conversation; the copies only bury it.
+        _tool_reported = True
+        return None
     reason = _queue_report(expected, happened, "tool")
     if reason is None:
         _tool_reported = True
+        _last_tool_report = (key, now)
     return reason
+
+
+_REPORT_REPEAT_S = 120          # same "expected" within this window = the same report
+_last_tool_report: tuple | None = None
 
 
 def _queue_report(expected, happened, source: str, ts: float | None = None) -> str | None:
@@ -1604,6 +1623,8 @@ def setup(log_dir: Path = ROOT / "logs", *, tee_console: bool = True) -> None:
 
 def _shutdown_locked() -> None:
     global _dir, _q, _thread, _dropped, _live_session, _notify, _transcript, _sec_mtime, _live_attempts
+    global _last_tool_report
+    _last_tool_report = None
     _uninstall_tee()
     _uninstall_hooks()
     _stop_writer()

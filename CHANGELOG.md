@@ -45,6 +45,19 @@ PATCH a cada correção. Tags: `v55.x.y`.
   Irlan em 2026-10-17.
 
 ### Fixed
+- **Triagem de 2026-10-23/24** (relatos do usuário em `logs/reports.jsonl`):
+  - `flight_finder`: o link levava um `tfs=` fixo de outra viagem (IST → LHR, 2025-03-15); a página
+    abria no navegador do usuário, que nada lê, e o `speak()` em inglês chegava ao modelo como fala
+    do usuário e disparava a busca de novo (8 chamadas em 5 s). Agora usa a sessão automatizada,
+    uma busca por vez, e o resultado volta só como dado.
+  - `report_problem`: o mesmo pedido relatado de novo em até 2 min não vira outro relato (eram 6 em 13 s).
+  - `open_app`: `desktop/…` (e os demais atalhos) é caminho, passa pela política de pastas (programa
+    exige pasta de leitura e escrita) e abre sem shell; a busca do Iniciar/Spotlight não diz mais
+    "Opened" sem saber se abriu (virava busca na web).
+  - Prompt: o que uma ferramenta leu (nota, arquivo, página, e-mail) é dado, nunca ordem — o modelo
+    abriu o XAMPP porque uma nota mandava. Os limites do JARVIS agora dizem quais pastas ele pode
+    usar e que erros dele vão para o `report_problem` em `logs/`, nunca para as notas do usuário
+    (ele tinha escrito "erros a corrigir na assistência" no `insights.md` do usuário).
 - Spec 003: os atalhos Desktop/Documents/Downloads/Pictures/Music/Videos agora seguem as pastas reais do sistema (`core/user_dirs.py`): redirecionamento do OneDrive no Windows, XDG no Linux. Antes usavam `~/Desktop`, uma pasta velha com 4 arquivos, e `pdf-dark` "não existia" (visto em 2026-10-23).
 - **Sessão de voz caía a cada ~10 min (GoAway)**: o servidor do Gemini Live avisa com `go_away`
   (e `time_left`) antes de fechar a conexão no limite de tempo; o app ignorava o aviso e era

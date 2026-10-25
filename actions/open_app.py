@@ -96,10 +96,52 @@ def _file_path_of(name: str) -> str | None:
         return None
     if _WIN_ABS_PATH.match(raw) or raw.startswith(("/", "~")):
         return os.path.expandvars(os.path.expanduser(raw))
+    # "desktop/pdf-dark/dist/pdf-dark.exe": the same shortcuts file_controller takes.
+    # Before, this was typed into the Start menu search, which sent it to a web
+    # search — and still answered "Opened" (2026-10-23).
+    head, sep, rest = raw.replace("\\", "/").partition("/")
+    folder = _SHORTCUTS.get(head.lower()) if sep else None
+    if folder is not None:
+        return str(folder() / rest.strip("/"))
     return None
 
 
-def _launch_windows(app_name: str) -> bool:
+def _home():
+    from pathlib import Path
+    return Path.home()
+
+
+def _shortcut(name):
+    def get():
+        from core import user_dirs
+        return getattr(user_dirs, name)()
+    return get
+
+
+_SHORTCUTS = {n: _shortcut(n) for n in
+              ("desktop", "documents", "downloads", "pictures", "music", "videos")}
+_SHORTCUTS["home"] = _home
+
+# Opening one of these runs a program, so the folder must allow running (rw), not
+# just reading.
+_PROGRAM_EXT = {".exe", ".bat", ".cmd", ".com", ".msi", ".ps1", ".vbs", ".lnk",
+                ".sh", ".command", ".app", ".appimage", ".jar", ".py"}
+
+
+def _open_file(path: str) -> bool:
+    """Open a file with whatever the OS associates with it — no shell, so a name
+    can never be read as a command."""
+    if _SYSTEM == "Windows":
+        os.startfile(path)
+    elif _SYSTEM == "Darwin":
+        subprocess.run(["open", path], check=True, timeout=10)
+    else:
+        subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    return True
+
+
+def _launch_windows(app_name: str) -> bool | None:
 
     if shutil.which(app_name) or shutil.which(app_name.split(".")[0]):
         try:
@@ -131,14 +173,16 @@ def _launch_windows(app_name: str) -> bool:
         time.sleep(0.9)
         pyautogui.press("enter")
         time.sleep(2.5)
-        return True
+        # Typed, not launched: with no match Windows sends the text to a web search,
+        # and "Opened" was reported anyway (2026-10-23). None = could not confirm.
+        return None
     except Exception as e:
         print(f"[open_app] Start Menu search failed: {e}")
 
     return False
 
 
-def _launch_macos(app_name: str) -> bool:
+def _launch_macos(app_name: str) -> bool | None:
 
     try:
         result = subprocess.run(
@@ -183,7 +227,7 @@ def _launch_macos(app_name: str) -> bool:
         time.sleep(0.8)
         pyautogui.press("enter")
         time.sleep(1.5)
-        return True
+        return None                 # typed into Spotlight; whether it opened is unknown
     except Exception as e:
         print(f"[open_app] Spotlight failed: {e}")
 
@@ -279,8 +323,23 @@ def open_app(
     # Windows shows its own "cannot find" dialog — seen in the real app as
     # "Opened C:\não\arquivo_existe.txt." for a file that never existed.
     path = _file_path_of(app_name)
-    if path is not None and not os.path.exists(path):
-        return f"The file {app_name} does not exist."
+    if path is not None:
+        from core import fs_policy
+        op = "exec" if os.path.splitext(path)[1].lower() in _PROGRAM_EXT else "read"
+        try:
+            path = str(fs_policy.require(path, op, actor="open_app"))
+        except fs_policy.PolicyDenied as e:
+            return str(e)
+        if not os.path.exists(path):
+            return f"The file {app_name} does not exist."
+        if player:
+            player.write_log(f"[open_app] {path}")
+        try:
+            _open_file(path)
+            return f"Opened {path}."
+        except Exception as e:
+            print(f"[open_app] Error: {e}")
+            return f"Failed to open {path}: {e}"
 
     normalized = _normalize(app_name)
     print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
@@ -289,11 +348,14 @@ def open_app(
         player.write_log(f"[open_app] {app_name}")
 
     try:
-        if launcher(normalized):
+        ok = launcher(normalized)
+        if ok is False and normalized.lower() != app_name.lower():
+            ok = launcher(app_name)
+        if ok:
             return f"Opened {app_name}."
-        if normalized.lower() != app_name.lower():
-            if launcher(app_name):
-                return f"Opened {app_name}."
+        if ok is None:
+            return (f"No app called {app_name} was found, so I typed it into the system "
+                    f"search; I cannot confirm that anything opened. Do not say it opened.")
         return (
             f"Could not confirm that {app_name} launched. "
             f"It may still be loading, or it might not be installed."

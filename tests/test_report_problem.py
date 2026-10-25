@@ -421,3 +421,21 @@ def test_the_receive_loop_cost_stays_tiny_with_transcription(on):
         samples.append((time.perf_counter() - t0) * 1000)
     samples.sort()
     assert samples[int(len(samples) * 0.95)] < 0.2
+
+
+# ── the same report repeated (triage 2026-10-23: one failure became six reports) ──
+def test_same_expectation_repeated_within_two_minutes_is_written_once(on, monkeypatch):
+    now = [T0]
+    monkeypatch.setattr(errlog, "_clock", lambda: now[0])
+    h = handler()
+    assert h({"expected": "resultados da busca de voo", "happened": "mensagem em inglês"}) \
+        == "Logged. Confirm in one short sentence."
+    now[0] += 13
+    assert h({"expected": "Resultados da  busca de voo", "happened": "mensagem repetida"}) \
+        == "Logged. Confirm in one short sentence."              # the model is told it is logged
+    now[0] += 200                                                # outside the window: a new report
+    h({"expected": "resultados da busca de voo", "happened": "de novo"})
+    h({"expected": "abrir o Excel", "happened": "abriu o Word"})  # another request: written
+    errlog.flush()
+    got = [r["happened"] for r in read_lines(on / "reports.jsonl")]
+    assert got == ["mensagem em inglês", "de novo", "abriu o Word"]
