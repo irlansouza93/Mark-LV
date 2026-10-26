@@ -85,6 +85,7 @@ from core                      import user_dirs
 from core                      import audio_devices
 from core                      import errlog
 from core                      import llm_usage
+from core                      import tool_progress
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
@@ -1382,20 +1383,32 @@ class JarvisLive:
         self.ui.write_log("SYS: Interrupted — listening...")
 
     def speak(self, text: str):
+        # Actions call this mid-run. The only way in is a "user" turn: sent bare it
+        # WAS the user talking, and flight_finder's English progress line got an
+        # English reply and 8 more calls of the same tool (2026-10-23). While a
+        # call is still open even a [TOOL_PROGRESS]-tagged line was taken as a new
+        # request (real test 2026-10-26: flight_finder called again 1.2 s later,
+        # nothing said), so then the line only goes to the log - the tool's own
+        # result tells the model how it went. A job left running after its call
+        # returned (game_updater's download watcher) still gets the tagged turn.
+        if not tool_progress.should_send(len(self._tool_tasks)):
+            self.ui.write_log(f"SYS: {' '.join(str(text or '').split())}")
+            return
         if not self._loop or not self.session:
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
-                turns={"role": "user", "parts": [{"text": text}]},
+                turns={"role": "user", "parts": [{"text": tool_progress.frame(text)}]},
                 turn_complete=True
             ),
             self._loop
         )
 
     def speak_error(self, tool_name: str, error: str):
+        # Log only: the tool response already tells the model "Tool 'x' failed",
+        # and a second message for it would be one more turn to answer.
         short = str(error)[:120]
         self.ui.write_log(f"ERR: {tool_name} — {short}")
-        self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
