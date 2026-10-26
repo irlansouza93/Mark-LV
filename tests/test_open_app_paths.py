@@ -26,11 +26,12 @@ def test_missing_windows_path_detected_on_any_os():
     assert oa._file_path_of(r"\\server\share\x.docx") is not None
 
 
-def test_existing_path_still_goes_to_launcher(monkeypatch, tmp_path):
+def test_existing_path_opens_with_its_associated_app(monkeypatch, tmp_path):
     f = tmp_path / "exists.txt"
     f.write_text("x", encoding="utf-8")
     seen = []
-    monkeypatch.setitem(oa._OS_LAUNCHERS, oa._SYSTEM, lambda n: seen.append(n) or True)
+    monkeypatch.setitem(oa._OS_LAUNCHERS, oa._SYSTEM, _no_launch)    # never the shell `start`
+    monkeypatch.setattr(oa, "_open_file", lambda p: seen.append(p) or True)
     assert oa.open_app({"app_name": str(f)}).startswith("Opened")
     assert seen
 
@@ -39,3 +40,53 @@ def test_app_names_and_uris_are_not_paths():
     for name in ("WhatsApp", "Chrome", "libreoffice --writer", "ms-settings:",
                  "https://example.com/a/b", "notepad.exe"):
         assert oa._file_path_of(name) is None, name
+
+
+# ── triage 2026-10-23: "abra desktop/pdf-dark/dist/pdf-dark.exe" became a web search ──
+def test_desktop_shortcut_is_a_path(monkeypatch, tmp_path):
+    from core import user_dirs
+    exe = tmp_path / "pdf-dark" / "dist" / "pdf-dark.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(user_dirs, "desktop", lambda: tmp_path)
+    assert oa._file_path_of("desktop/pdf-dark/dist/pdf-dark.exe") == str(exe)
+    assert oa._file_path_of(r"Desktop\pdf-dark\dist\pdf-dark.exe") == str(exe)
+    seen = []
+    monkeypatch.setitem(oa._OS_LAUNCHERS, oa._SYSTEM, _no_launch)
+    monkeypatch.setattr(oa, "_open_file", lambda p: seen.append(p) or True)
+    assert oa.open_app({"app_name": "desktop/pdf-dark/dist/pdf-dark.exe"}).startswith("Opened")
+    assert seen and seen[0].lower().endswith("pdf-dark.exe")
+
+
+def test_program_in_read_only_folder_is_refused(monkeypatch, tmp_path):
+    from core import fs_policy
+    exe = tmp_path / "tool.exe"
+    exe.write_bytes(b"MZ")
+    fs_policy.configure(folders=[{"path": str(tmp_path), "mode": "ro"}])
+    try:
+        monkeypatch.setattr(oa, "_open_file", _no_launch)
+        out = oa.open_app({"app_name": str(exe)})
+        assert out.startswith("[FOLDER_POLICY]") and "read-only" in out
+    finally:
+        fs_policy.reset()
+
+
+def test_keyboard_fallback_never_claims_success(monkeypatch):
+    monkeypatch.setitem(oa._OS_LAUNCHERS, oa._SYSTEM, lambda n: None)   # typed into search
+    out = oa.open_app({"app_name": "UmAppQueNaoExiste"})
+    assert not out.startswith("Opened") and "cannot confirm" in out
+
+
+def test_guessed_home_desktop_maps_to_the_real_one(monkeypatch, tmp_path):
+    # real test 2026-10-25: the model sent C:/Users/<me>/Desktop/... while OneDrive
+    # keeps the real Desktop elsewhere
+    from pathlib import Path
+    from core import user_dirs
+    home, real = tmp_path / "home", tmp_path / "OneDrive" / "Desk"
+    (real / "pdf-dark").mkdir(parents=True)
+    (real / "pdf-dark" / "a.exe").write_bytes(b"MZ")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(user_dirs, "desktop", lambda: real)
+    assert oa._file_path_of(str(home / "Desktop" / "pdf-dark" / "a.exe")) == str(real / "pdf-dark" / "a.exe")
+    missing = str(home / "Desktop" / "nope.exe")
+    assert oa._file_path_of(missing) == missing          # still reported as missing
