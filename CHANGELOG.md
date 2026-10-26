@@ -45,6 +45,7 @@ PATCH a cada correção. Tags: `v55.x.y`.
   Irlan em 2026-10-17.
 
 ### Fixed
+- **`speak()` das ações não chega mais ao modelo como fala do usuário** (`core/tool_progress.py`): com uma chamada de ferramenta aberta a linha vai só para o log (no teste real, até marcada ela fazia o modelo repetir a chamada); com nenhuma aberta (ex.: aviso do download do `game_updater`) vai marcada `[TOOL_PROGRESS]`, documentada em `core/prompt.txt`, e é dita em pt-BR sem chamar ferramenta. `speak_error` só registra (o resultado da ferramenta já leva o erro) e saíram os `speak()` que repetiam o texto retornado (`code_helper`, `dev_agent`, `game_updater`, `youtube_video`).
 - **Triagem de 2026-10-23/24** (relatos do usuário em `logs/reports.jsonl`):
   - `flight_finder`: o link levava um `tfs=` fixo de outra viagem (IST → LHR, 2025-03-15); a página
     abria no navegador do usuário, que nada lê, e o `speak()` em inglês chegava ao modelo como fala

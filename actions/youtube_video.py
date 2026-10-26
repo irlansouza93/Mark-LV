@@ -340,9 +340,6 @@ def _handle_summarize(parameters: dict, player, speak) -> str:
     except Exception as e:
         return f"Summary generation failed, sir: {e}"
 
-    if speak:
-        speak(summary)
-
     if parameters.get("save", False):
         saved_path = _save_summary(summary, url)
         return f"Summary complete and saved to Desktop: {saved_path}"
@@ -375,9 +372,6 @@ def _handle_get_info(parameters: dict, player, speak) -> str:
     ]
     result = "\n".join(lines)
 
-    if speak:
-        speak(f"Here's the video info, sir. {result.replace(chr(10), '. ')}")
-
     return result
 
 
@@ -394,13 +388,6 @@ def _handle_trending(parameters: dict, player, speak) -> str:
     lines  = [f"Top trending videos in {region}:"]
     lines += [f"{v['rank']}. {v['title']} — {v['channel']}" for v in trending]
     result = "\n".join(lines)
-
-    if speak:
-        top3   = trending[:3]
-        spoken = "Here are the top trending videos, sir. " + ". ".join(
-            f"Number {v['rank']}: {v['title']} by {v['channel']}" for v in top3
-        )
-        speak(spoken)
 
     return result
 

@@ -282,7 +282,6 @@ def _build(description, language, output_path, args, timeout, speak=None, player
         raise
     except Exception as e:
         msg = f"Could not write initial code: {e}"
-        if speak: speak(msg)
         return msg
 
     # The code is on disk (reversible); ONE confirmation covers the whole run -> fix -> run
@@ -307,7 +306,6 @@ def _build_cycle(code, path, description, args, timeout, speak=None, player=None
                 f"The code is working after {attempt} attempt{'s' if attempt > 1 else ''}. "
                 f"Saved to {path}."
             )
-            if speak: speak(msg)
             return f"{msg}\n\nOutput:\n{last_output}"
 
         print(f"[Code] ⚠️ Error on attempt {attempt}, fixing...")
@@ -319,14 +317,12 @@ def _build_cycle(code, path, description, args, timeout, speak=None, player=None
             _save_file(path, code)
         except Exception as e:
             msg = f"Could not fix code on attempt {attempt}: {e}"
-            if speak: speak(msg)
             return msg
 
     msg = (
         f"I was unable to build a working version after {MAX_BUILD_ATTEMPTS} attempts, sir. "
         f"The last error was: {last_output[:200]}"
     )
-    if speak: speak(msg)
     return f"{msg}\n\nLast code saved to: {path}"
 
 def _write_action(description, language, output_path, player) -> str:

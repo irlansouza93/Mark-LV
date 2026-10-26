@@ -482,11 +482,9 @@ def _build_project(
         plan = _plan_project(description, language)
     except RateLimitError:
         msg = "Rate limit reached, sir. Please try again in a moment."
-        if speak: speak(msg)
         return msg
     except ValueError as e:
         msg = f"Planning failed: {e}"
-        if speak: speak(msg)
         return msg
 
     proj_name    = project_name or plan.get("project_name", "jarvis_project")
@@ -494,7 +492,6 @@ def _build_project(
     try:
         project_dir = fs_policy.require(PROJECTS_DIR / proj_name, "write", actor="dev_agent")
     except fs_policy.PolicyDenied as e:
-        if speak: speak("That folder is not on your allowed list, sir.")
         return str(e)
     project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -549,7 +546,6 @@ def _build_project(
 
     if not file_codes:
         msg = "I could not write any project files, sir."
-        if speak: speak(msg)
         return msg
 
     deps = ", ".join(dependencies) if dependencies else "none"
@@ -597,7 +593,6 @@ def _install_and_run(*, dependencies, project_dir, run_command, timeout, descrip
                 f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
                 f"Saved to: {project_dir}"
             )
-            if speak: speak(msg)
             return f"{msg}\n\nOutput:\n{last_output}"
 
         if attempt == MAX_FIX_ATTEMPTS:
@@ -627,7 +622,6 @@ def _install_and_run(*, dependencies, project_dir, run_command, timeout, descrip
             time.sleep(1)
         except RateLimitError:
             msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
-            if speak: speak(msg)
             return msg
         except Exception as e:
             log(f"Fix step failed: {e}")
@@ -636,7 +630,6 @@ def _install_and_run(*, dependencies, project_dir, run_command, timeout, descrip
         f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
         f"Project is saved at {project_dir} — open it in VSCode and check manually."
     )
-    if speak: speak(msg)
     return f"{msg}\n\nLast error:\n{last_output[:600]}"
 
 
