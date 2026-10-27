@@ -7,6 +7,12 @@ PATCH a cada correção. Tags: `v55.x.y`.
 
 ## [Unreleased]
 
+## [55.4.0] — 2026-10-26
+
+Specs 001 (registro de falhas e uso de LLM), 002 (rede de segurança do silêncio) e 003
+(pastas liberadas) mescladas em `irlan-dev` — três features, MINOR 1 → 4 —, mais as correções
+de PRs #3, #6, #8 e #9.
+
 ### Added
 - Estrutura de desenvolvimento própria: Spec Kit (`.specify/`, skills `speckit-*`), constituição
   v1.0.0, `docs/VISAO.md`, `docs/demandas.md` (parecer das 14 demandas), `docs/HARNESS.md`,
